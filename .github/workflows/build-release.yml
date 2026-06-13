@@ -1,0 +1,68 @@
+name: Build Release (macOS + Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller BytraImperfectionProcessor.spec --noconfirm --clean
+
+      - name: Package .app as zip
+        run: |
+          APP_NAME=$(python -c "from branding import APP_NAME; print(APP_NAME)")
+          cd dist
+          zip -r "PhanMemTuDongHoa-macOS.zip" "${APP_NAME}.app"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhanMemTuDongHoa-macOS
+          path: dist/PhanMemTuDongHoa-macOS.zip
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build with PyInstaller
+        run: pyinstaller BytraImperfectionProcessor.spec --noconfirm --clean
+
+      - name: Package Windows folder as zip
+        shell: pwsh
+        run: |
+          $appName = python -c "from branding import APP_NAME; print(APP_NAME)"
+          Compress-Archive -Path "dist\$appName" -DestinationPath "dist\PhanMemTuDongHoa-Windows.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhanMemTuDongHoa-Windows
+          path: dist/PhanMemTuDongHoa-Windows.zip

@@ -1,0 +1,14 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+build/
+dist/
+output/
+outputFile/
+*.spec.bak
+installer/Output/
+.DS_Store
+Thumbs.db

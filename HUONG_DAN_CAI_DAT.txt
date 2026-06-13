@@ -1,0 +1,47 @@
+PHAN MEM TU DONG HOA — HUONG DAN CAI DAT
+=========================================
+
+*** QUAN TRONG ***
+Thu muc "build" la file tam khi dong goi — KHONG CAI DAT, KHONG MO.
+File ".pkg" trong build/ KHONG phai bo cai macOS.
+
+
+TREN macOS
+----------
+1. Chay build_mac.sh (hoac da build san)
+2. Mo thu muc: dist/
+3. Double-click: Phần mềm tự động hoá.app
+
+File zip de gui nguoi dung: dist/PhanMemTuDongHoa-macOS.zip
+
+Neu macOS chan (khong mo duoc):
+  - Click phai app -> Mo -> Xac nhan Mo
+  - Hoac: Cai dat -> Rieng tu & Bao mat -> Cho phep app
+
+Ket qua xu ly luu tai: output/ (canh file .app)
+
+
+TREN WINDOWS
+------------
+1. Chay build_windows.bat tren may Windows
+2. Mo thu muc: dist\Phần mềm tự động hoá\
+3. Chay: Phần mềm tự động hoá.exe
+
+File zip de gui nguoi dung: dist\PhanMemTuDongHoa-Windows.zip
+
+(Tao file Setup.exe: mo installer\setup.iss bang Inno Setup -> Compile)
+
+
+BUILD CA HAI NEN TANG (GitHub Actions)
+--------------------------------------
+Neu co repo tren GitHub:
+  - Push tag v* hoac chay workflow "Build Release (macOS + Windows)"
+  - Tai file zip macOS va Windows tu muc Artifacts
+
+
+PHAN PHOI CHO NGUOI DUNG
+------------------------
+- macOS: gui file PhanMemTuDongHoa-macOS.zip (hoac thu muc .app)
+- Windows: gui file PhanMemTuDongHoa-Windows.zip (hoac file Setup.exe)
+- Khong can cai Python
+- Can Internet de kiem tra kich hoat
