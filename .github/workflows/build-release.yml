@@ -3,6 +3,8 @@ name: Build Release (macOS + Windows)
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
