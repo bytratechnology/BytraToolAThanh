@@ -60,8 +60,7 @@ jobs:
       - name: Package Windows folder as zip
         shell: pwsh
         run: |
-          $appName = python -c "from branding import APP_NAME; print(APP_NAME)"
-          Compress-Archive -Path "dist\$appName" -DestinationPath "dist\PhanMemTuDongHoa-Windows.zip" -Force
+          Compress-Archive -Path "dist\PhanMemTuDongHoa" -DestinationPath "dist\PhanMemTuDongHoa-Windows.zip" -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4

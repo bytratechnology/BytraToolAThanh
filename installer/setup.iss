@@ -4,7 +4,7 @@
 #define MyAppName "Phần mềm tự động hoá"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Bytra"
-#define MyAppExeName "Phần mềm tự động hoá.exe"
+#define MyAppExeName "PhanMemTuDongHoa.exe"
 
 [Setup]
 AppId={{B4E8F2A1-9C3D-4F1E-A2B8-7D6E5F4A3B2C}
@@ -27,7 +27,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Tao shortcut tren Desktop"; GroupDescription: "Tuy chon:"
 
 [Files]
-Source: "..\dist\Phần mềm tự động hoá\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\PhanMemTuDongHoa\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

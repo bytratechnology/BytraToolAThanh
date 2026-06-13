@@ -28,7 +28,7 @@ echo Dong goi bang PyInstaller...
 pyinstaller BytraImperfectionProcessor.spec --noconfirm --clean
 if errorlevel 1 exit /b 1
 
-for /f "delims=" %%A in ('python -c "from branding import APP_NAME; print(APP_NAME)"') do set APP_NAME=%%A
+for /f "delims=" %%A in ('python -c "from branding import APP_BUILD_NAME; print(APP_BUILD_NAME)"') do set APP_NAME=%%A
 
 echo Dang dong goi zip...
 powershell -NoProfile -Command "Compress-Archive -Path 'dist\%APP_NAME%' -DestinationPath 'dist\PhanMemTuDongHoa-Windows.zip' -Force"

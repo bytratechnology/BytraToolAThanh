@@ -9,9 +9,10 @@ from PyInstaller.utils.hooks import collect_submodules
 project_dir = Path(SPECPATH)
 sys.path.insert(0, str(project_dir))
 
-from branding import APP_NAME
+from branding import APP_BUILD_NAME, APP_NAME
 
 app_bundle_name = f"{APP_NAME}.app"
+build_name = APP_BUILD_NAME
 
 datas = [(str(project_dir / "A_THANH"), "A_THANH")]
 
@@ -52,7 +53,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name=APP_NAME,
+    name=build_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -73,7 +74,7 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name=APP_NAME,
+    name=build_name,
 )
 
 # macOS: tao file .app de double-click (KHONG phai file .pkg trong thu muc build/)
