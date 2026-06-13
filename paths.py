@@ -13,7 +13,6 @@ class ProjectPaths:
     matlab_template: Path
     output_dir: Path
     inp_output: Path | None = None
-    instance_name: str = "C10012"
 
     @classmethod
     def defaults(cls, base_dir: Path | str | None = None):
@@ -38,7 +37,6 @@ class ProjectPaths:
                 if self.inp_output
                 else None
             ),
-            instance_name=self.instance_name,
         )
 
     @property

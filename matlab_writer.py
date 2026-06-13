@@ -1,6 +1,7 @@
 import os
 import re
 
+from file_io import write_text
 from inputs import CalculatedOutputs, ProcessInputs
 
 MATLAB_OUTPUT = "PROCESS/LT03DLK02DC10012_1p5m_E1_G_Duong.m"
@@ -189,8 +190,7 @@ def write_matlab_file(
             count=1,
         )
 
-    with open(matlab_output, "w", encoding="utf-8") as f:
-        f.write(content)
+    write_text(matlab_output, content)
 
 
 def update_matlab_parameters(
@@ -214,5 +214,4 @@ def update_matlab_parameters(
         flags=re.DOTALL | re.MULTILINE,
     )
 
-    with open(matlab_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    write_text(matlab_path, content)

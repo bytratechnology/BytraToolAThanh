@@ -82,12 +82,14 @@ def _run_incorporation(paths: ProjectPaths, on_progress=None) -> str:
 
 
 def _write_inp(paths: ProjectPaths, on_progress=None) -> str:
-    _notify(on_progress, f"Bước 2: Đang ghi tọa độ vào {paths.inp_result.name}...")
+    _notify(
+        on_progress,
+        f"Bước 2: Đang ghi tọa độ vào {paths.inp_result.name} (*Node đầu → *Element)...",
+    )
     msg = write_myfile_to_inp(
         inp_source=paths.inp_source,
         myfile_path=paths.myfile_output,
         inp_output=paths.inp_result,
-        instance_name=paths.instance_name,
     )
     _notify(on_progress, f"Bước 2: {msg}")
     return msg

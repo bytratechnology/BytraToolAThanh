@@ -1,10 +1,8 @@
-import re
 from pathlib import Path
 
 INP_SOURCE = Path("A_THANH/LT03D_LK02D_C10012_L1p5m_E1.inp")
 INP_OUTPUT = Path("PROCESS/LT03D_LK02D_C10012_L1p5m_E1.inp")
 MYFILE_INPUT = Path("PROCESS/myfile.txt")
-INSTANCE_NAME = "C10012"
 
 
 def load_myfile_coords(myfile_path):
@@ -72,11 +70,10 @@ def write_myfile_to_inp(
     inp_source=INP_SOURCE,
     myfile_path=MYFILE_INPUT,
     inp_output=INP_OUTPUT,
-    instance_name=INSTANCE_NAME,
 ):
     """
-    Ghi 3 cột tọa độ từ myfile.txt vào block *Node của instance C10012.
-    Giữ nguyên cột số thứ tự node. File gốc A_THANH không bị sửa.
+    Ghi tọa độ từ myfile.txt vào block *Node đầu tiên (đến trước *Element).
+    Giữ nguyên cột số thứ tự node.
     """
     inp_source = Path(inp_source)
     myfile_path = Path(myfile_path)
@@ -90,33 +87,22 @@ def write_myfile_to_inp(
     coords = load_myfile_coords(myfile_path)
     lines = inp_source.read_text(encoding="utf-8", errors="ignore").splitlines(keepends=True)
 
-    instance_pattern = re.compile(
-        rf"^\*Instance,\s*name={re.escape(instance_name)}\b", re.IGNORECASE
-    )
-
-    in_target_instance = False
     in_node_block = False
+    found_node_keyword = False
     coord_idx = 0
     updated = 0
 
     for i, line in enumerate(lines):
         stripped = line.strip()
 
-        if instance_pattern.match(stripped):
-            in_target_instance = True
-            in_node_block = False
+        if not found_node_keyword:
+            if stripped.startswith("*Node"):
+                found_node_keyword = True
+                in_node_block = True
             continue
 
-        if in_target_instance and stripped.startswith("*End Instance"):
+        if in_node_block and stripped.startswith("*Element"):
             break
-
-        if in_target_instance and stripped.startswith("*Node"):
-            in_node_block = True
-            continue
-
-        if in_node_block and stripped.startswith("*"):
-            in_node_block = False
-            continue
 
         if in_node_block and _is_node_data_line(line):
             if coord_idx >= len(coords):
@@ -131,7 +117,10 @@ def write_myfile_to_inp(
             updated += 1
 
     if updated == 0:
-        raise ValueError(f"Không tìm thấy block *Node của instance {instance_name}")
+        raise ValueError(
+            f"Không tìm thấy block *Node trong {inp_source} "
+            f"(từ *Node đầu tiên đến *Element)"
+        )
 
     if coord_idx != len(coords):
         raise ValueError(

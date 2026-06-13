@@ -1,10 +1,11 @@
 import math
-import os
-import re
-import shutil
+import tempfile
+from pathlib import Path
 
 import openpyxl
 
+from file_io import locked_file_message, replace_file, run_with_retry, write_text
+from inp_parser import parse_nodes_from_inp
 from matlab_writer import write_matlab_file
 from paths import DEFAULT_PATHS, ProjectPaths
 
@@ -13,72 +14,56 @@ START_ROW = 3
 TOL = 1e-3
 
 
-def parse_nodes_from_inp(inp_path, instance_name="C10012"):
-    """Đọc block *Node của instance C10012 trong file Abaqus .inp."""
-    nodes = []
-    in_target_instance = False
-    inside_node = False
-
-    instance_pattern = re.compile(
-        rf"^\*Instance,\s*name={re.escape(instance_name)}\b", re.IGNORECASE
-    )
-
-    with open(inp_path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-
-            if instance_pattern.match(line):
-                in_target_instance = True
-                inside_node = False
-                continue
-
-            if in_target_instance and line.startswith("*End Instance"):
-                break
-
-            if in_target_instance and line.startswith("*Node"):
-                inside_node = True
-                continue
-
-            if inside_node and line.startswith("*"):
-                break
-
-            if inside_node and line:
-                parts = [x.strip() for x in line.split(",")]
-                if len(parts) < 4:
-                    continue
-
-                try:
-                    node_id = int(parts[0])
-                    x = float(parts[1])
-                    y = float(parts[2])
-                    z = float(parts[3])
-                    nodes.append((node_id, x, y, z))
-                except ValueError:
-                    continue
-
-    return nodes
-
-
 def write_nodes_to_section_a(nodes, excel_template, excel_output, start_row=3):
     """
-    Copy file Excel gốc sang thư mục đích, dán tọa độ node vào SectionA (H=x, I=y, J=z).
+    Đọc Excel mẫu, dán tọa độ node vào SectionA (H=x, I=y, J=z), ghi ra output.
     File mẫu gốc không bị thay đổi.
     """
-    out_dir = os.path.dirname(excel_output)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    shutil.copy2(excel_template, excel_output)
+    excel_template = Path(excel_template)
+    excel_output = Path(excel_output)
+    excel_output.parent.mkdir(parents=True, exist_ok=True)
 
-    wb = openpyxl.load_workbook(excel_output)
-    ws = wb[SHEET_SECTION_A]
+    wb = openpyxl.load_workbook(excel_template)
+    try:
+        ws = wb[SHEET_SECTION_A]
 
-    for i, (_, x, y, z) in enumerate(nodes):
-        row = start_row + i
-        ws[f"H{row}"] = x
-        ws[f"I{row}"] = y
-        ws[f"J{row}"] = z
+        for i, (_, x, y, z) in enumerate(nodes):
+            row = start_row + i
+            ws[f"H{row}"] = x
+            ws[f"I{row}"] = y
+            ws[f"J{row}"] = z
 
-    wb.save(excel_output)
+        with tempfile.NamedTemporaryFile(
+            suffix=".xlsx",
+            dir=excel_output.parent,
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+
+        try:
+            def save_excel():
+                wb.save(tmp_path)
+                replace_file(tmp_path, excel_output)
+
+            run_with_retry(save_excel, excel_output)
+        except PermissionError:
+            raise
+        except OSError as exc:
+            if _is_file_locked_oserror(exc):
+                raise PermissionError(locked_file_message(excel_output)) from exc
+            raise
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+    finally:
+        wb.close()
+
+
+def _is_file_locked_oserror(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) == 32 or "being used by another process" in str(exc)
 
 
 def _format_number(value):
@@ -89,13 +74,11 @@ def _format_number(value):
 
 def write_matrix_txt(nodes, matrix_output):
     """Ghi tọa độ node (x, y, z) vào Matrix.txt, mỗi dòng cách nhau bằng tab."""
-    out_dir = os.path.dirname(matrix_output)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-
-    with open(matrix_output, "w", encoding="utf-8") as f:
-        for _, x, y, z in nodes:
-            f.write(f"{_format_number(x)}\t{_format_number(y)}\t{_format_number(z)}\n")
+    lines = [
+        f"{_format_number(x)}\t{_format_number(y)}\t{_format_number(z)}"
+        for _, x, y, z in nodes
+    ]
+    write_text(matrix_output, "\n".join(lines) + "\n")
 
 
 def _dist(point):
@@ -182,15 +165,13 @@ def select_11_points(nodes):
 
 def write_selected_points(selected_points, output_path):
     """Ghi 11 điểm đo ra file text."""
-    out_dir = os.path.dirname(output_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("# 11 tọa độ đo (X, Y) chọn từ Matrix\n")
-        f.write("# STT\tMô tả\tX\tY\n")
-        for i, (label, (x, y)) in enumerate(selected_points, start=1):
-            f.write(f"{i}\t{label}\t{_format_number(x)}\t{_format_number(y)}\n")
+    lines = [
+        "# 11 tọa độ đo (X, Y) chọn từ Matrix",
+        "# STT\tMô tả\tX\tY",
+    ]
+    for i, (label, (x, y)) in enumerate(selected_points, start=1):
+        lines.append(f"{i}\t{label}\t{_format_number(x)}\t{_format_number(y)}")
+    write_text(output_path, "\n".join(lines) + "\n")
 
 
 def _notify(on_progress, message: str):
@@ -209,16 +190,9 @@ def run_processing(paths: ProjectPaths | None = None, on_progress=None):
 
     _notify(
         on_progress,
-        f"Bước 1: Đang đọc node từ {paths.inp_source.name} "
-        f"(instance {paths.instance_name})...",
+        f"Bước 1: Đang đọc node từ {paths.inp_source.name} (*Node đầu → *Element)...",
     )
-    nodes = parse_nodes_from_inp(paths.inp_source, paths.instance_name)
-
-    if not nodes:
-        raise ValueError(
-            f"Không tìm thấy dữ liệu *Node trong {paths.inp_source} "
-            f"(instance {paths.instance_name})"
-        )
+    nodes = parse_nodes_from_inp(paths.inp_source)
 
     _notify(on_progress, f"Bước 1: Đã đọc {len(nodes)} node. Đang ghi Excel...")
     write_nodes_to_section_a(
