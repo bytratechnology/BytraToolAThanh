@@ -5,7 +5,6 @@ Xử lý imperfections tiết diện cho mô hình Abaqus — đọc file `.inp`
 ## Yêu cầu
 
 - Python 3.10+
-- Internet (kiểm tra kích hoạt qua Firebase)
 
 ## Chạy từ mã nguồn
 

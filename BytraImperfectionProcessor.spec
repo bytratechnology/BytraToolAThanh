@@ -4,7 +4,7 @@
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
 project_dir = Path(SPECPATH)
 sys.path.insert(0, str(project_dir))
@@ -14,10 +14,8 @@ from branding import APP_NAME
 app_bundle_name = f"{APP_NAME}.app"
 
 datas = [(str(project_dir / "A_THANH"), "A_THANH")]
-datas += collect_data_files("certifi")
 
 hiddenimports = [
-    "access_control",
     "app_runtime",
     "branding",
     "file_io",

@@ -44,4 +44,3 @@ PHAN PHOI CHO NGUOI DUNG
 - macOS: gui file PhanMemTuDongHoa-macOS.zip (hoac thu muc .app)
 - Windows: gui file PhanMemTuDongHoa-Windows.zip (hoac file Setup.exe)
 - Khong can cai Python
-- Can Internet de kiem tra kich hoat

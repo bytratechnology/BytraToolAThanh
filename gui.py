@@ -1,11 +1,9 @@
-import sys
 import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from access_control import verify_payment_access as verify_access
 from branding import APP_NAME, APP_TAGLINE
 from inputs import (
     CALCULATED_FIELD_LABELS,
@@ -78,12 +76,10 @@ class InputForm(tk.Tk):
         self.log_text: scrolledtext.ScrolledText | None = None
         self._operation_running = False
         self._active_step: int | None = None
-        self.access_status_label: ttk.Label | None = None
 
         self._setup_style()
         self._build_ui()
         self._center_window()
-        self._show_access_status("Đã kích hoạt.")
 
     def _setup_style(self):
         style = ttk.Style(self)
@@ -126,12 +122,6 @@ class InputForm(tk.Tk):
             text="Chọn file, bấm Bước 1 để xử lý, nhập tham số rồi bấm Bước 2",
             style="Sub.TLabel",
         ).pack(anchor="w", pady=(4, 0))
-        self.access_status_label = ttk.Label(
-            header,
-            text="",
-            style="Sub.TLabel",
-        )
-        self.access_status_label.pack(anchor="w", pady=(4, 0))
 
         canvas = tk.Canvas(self, bg="#f0f0f0", highlightthickness=0)
         scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
@@ -354,22 +344,6 @@ class InputForm(tk.Tk):
         if self.status_label:
             self.status_label.configure(text=text)
 
-    def _show_access_status(self, text: str, *, active: bool = True):
-        if self.access_status_label:
-            color = "#1e8449" if active else "#c0392b"
-            self.access_status_label.configure(text=text, foreground=color)
-
-    def _ensure_access(self) -> bool:
-        allowed, message = verify_access()
-        if allowed:
-            self._show_access_status(message, active=True)
-            return True
-
-        self._show_access_status("Chưa kích hoạt", active=False)
-        self._log(f"Truy cập bị từ chối: {message}")
-        messagebox.showerror("Không thể sử dụng", message)
-        return False
-
     def _begin_operation(self, step: int):
         """Khóa nút ngay khi bắt đầu để tránh nhấn liên tục."""
         self._operation_running = True
@@ -396,9 +370,6 @@ class InputForm(tk.Tk):
 
     def _on_process_step1(self):
         if self._operation_running:
-            return
-
-        if not self._ensure_access():
             return
 
         self._begin_operation(step=1)
@@ -446,9 +417,6 @@ class InputForm(tk.Tk):
 
     def _on_calculate(self):
         if self._operation_running:
-            return
-
-        if not self._ensure_access():
             return
 
         self._begin_operation(step=2)
@@ -534,19 +502,7 @@ class InputForm(tk.Tk):
         return f"{value:.8g}"
 
 
-def _show_access_denied(message: str):
-    root = tk.Tk()
-    root.withdraw()
-    messagebox.showerror("Không thể sử dụng", message, parent=root)
-    root.destroy()
-
-
 def launch_gui(paths=None, node_count=None):
-    allowed, message = verify_access()
-    if not allowed:
-        _show_access_denied(message)
-        sys.exit(1)
-
     app = InputForm(paths=paths, node_count=node_count)
     app.mainloop()
 
