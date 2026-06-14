@@ -284,10 +284,7 @@ class InputForm(tk.Tk):
     def _update_output_hint(self):
         try:
             paths = self.get_paths()
-            hint = (
-                f"Lưu: {paths.matlab_output.name}, Matrix.txt, myfile.txt, "
-                f"{paths.inp_result.name}"
-            )
+            hint = f"Kết quả: {paths.inp_result.name}"
         except Exception:
             hint = ""
         if self.output_hint_label:
@@ -406,7 +403,8 @@ class InputForm(tk.Tk):
         self._update_output_hint()
         messagebox.showinfo(
             "Bước 1 hoàn tất",
-            f"Đã xử lý {node_count} node.\nKết quả lưu trong thư mục đã chọn.",
+            f"Đã xử lý {node_count} node.\n"
+            f"Nhập tham số và chạy Bước 2 để tạo {self.get_paths().inp_result.name}.",
         )
 
     def _on_step1_failed(self, error: str):
@@ -481,9 +479,7 @@ class InputForm(tk.Tk):
         self._log("Bước 2: Hoàn tất.")
         messagebox.showinfo(
             "Bước 2 hoàn tất",
-            f"Đã ghi tham số và tạo file kết quả trong:\n{paths.output_dir}\n\n"
-            f"• {paths.myfile_output.name}\n"
-            f"• {paths.inp_result.name}",
+            f"Đã tạo file kết quả:\n{paths.inp_result}",
         )
 
     def _on_matlab_failed(self, error: str):

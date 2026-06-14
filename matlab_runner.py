@@ -42,7 +42,7 @@ def _notify(on_progress, message: str):
 
 
 def _run_matlab_binary(exe, paths: ProjectPaths, timeout, on_progress=None):
-    work_dir = paths.output_dir.resolve()
+    work_dir = paths.work_dir.resolve()
     script_name = paths.matlab_script_name
     _notify(on_progress, f"Bước 2: Đang chạy MATLAB ({script_name}.m)...")
     result = subprocess.run(
@@ -71,7 +71,7 @@ def _run_matlab_binary(exe, paths: ProjectPaths, timeout, on_progress=None):
 def _run_incorporation(paths: ProjectPaths, on_progress=None) -> str:
     _notify(on_progress, "Bước 2: Đang chạy incorporation (Python)...")
     py_msg = run_incorporation_python(
-        work_dir=paths.output_dir,
+        work_dir=paths.work_dir,
         matrix_file=paths.matrix_output,
         m_file=paths.matlab_output,
         output_file=paths.myfile_output,
@@ -86,12 +86,15 @@ def _write_inp(paths: ProjectPaths, on_progress=None) -> str:
         on_progress,
         f"Bước 2: Đang ghi tọa độ vào {paths.inp_result.name} (*Node đầu → *Element)...",
     )
+    paths.ensure_output_dir()
     msg = write_myfile_to_inp(
         inp_source=paths.inp_source,
         myfile_path=paths.myfile_output,
         inp_output=paths.inp_result,
     )
     _notify(on_progress, f"Bước 2: {msg}")
+    paths.cleanup_work_dir()
+    _notify(on_progress, "Bước 2: Đã xóa file tạm, chỉ giữ file .inp kết quả.")
     return msg
 
 

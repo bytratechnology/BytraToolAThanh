@@ -186,7 +186,7 @@ def run_processing(paths: ProjectPaths | None = None, on_progress=None):
 
     _notify(on_progress, "Bước 1: Kiểm tra file nguồn...")
     paths.validate_sources()
-    paths.ensure_output_dir()
+    paths.ensure_work_dir()
 
     _notify(
         on_progress,
@@ -220,7 +220,10 @@ def run_processing(paths: ProjectPaths | None = None, on_progress=None):
         node_count=len(nodes),
     )
     _notify(on_progress, f"Bước 1: Đã ghi MATLAB → {paths.matlab_output.name}")
-    _notify(on_progress, f"Bước 1: Hoàn tất. Thư mục kết quả: {paths.output_dir}")
+    _notify(
+        on_progress,
+        f"Bước 1: Hoàn tất. Chạy Bước 2 để tạo {paths.inp_result.name}",
+    )
 
     return len(nodes)
 

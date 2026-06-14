@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,31 +41,35 @@ class ProjectPaths:
         )
 
     @property
+    def work_dir(self) -> Path:
+        return self.output_dir / "_work"
+
+    @property
     def excel_output(self) -> Path:
-        return self.output_dir / self.excel_template.name
+        return self.work_dir / self.excel_template.name
 
     @property
     def matrix_output(self) -> Path:
-        return self.output_dir / "Matrix.txt"
+        return self.work_dir / "Matrix.txt"
 
     @property
     def selected_points_output(self) -> Path:
-        return self.output_dir / "SelectedPoints.txt"
+        return self.work_dir / "SelectedPoints.txt"
 
     @property
     def matlab_output(self) -> Path:
-        return self.output_dir / self.matlab_template.name
+        return self.work_dir / self.matlab_template.name
 
     @property
     def myfile_output(self) -> Path:
-        return self.output_dir / "myfile.txt"
+        return self.work_dir / "myfile.txt"
 
     @property
     def inp_result(self) -> Path:
         if self.inp_output:
             return self.inp_output
         stem = self.inp_source.stem
-        return self.output_dir / f"{stem}_IMPFECTION{self.inp_source.suffix}"
+        return self.output_dir / f"{stem}_IMPERFECTION{self.inp_source.suffix}"
 
     @property
     def matlab_script_name(self) -> str:
@@ -85,6 +90,13 @@ class ProjectPaths:
 
     def ensure_output_dir(self):
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def ensure_work_dir(self):
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+
+    def cleanup_work_dir(self):
+        if self.work_dir.is_dir():
+            shutil.rmtree(self.work_dir)
 
 
 DEFAULT_PATHS = ProjectPaths.defaults()

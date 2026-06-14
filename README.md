@@ -18,7 +18,7 @@ python main.py
 ## Quy trình sử dụng
 
 1. **Bước 1:** Chọn file `.inp`, Excel/MATLAB mẫu, thư mục output → xử lý node, tạo Matrix và file MATLAB.
-2. **Bước 2:** Nhập tham số (IT, HWL, HWD, tiết diện, slenderness…) → tính D/T/Nl/Nd → chạy incorporation → ghi `myfile.txt` và file `.inp` kết quả (`*_IMPFECTION.inp`).
+2. **Bước 2:** Nhập tham số (IT, HWL, HWD, tiết diện, slenderness…) → tính D/T/Nl/Nd → chạy incorporation → ghi file `.inp` kết quả (`*_IMPERFECTION.inp`).
 
 ## Build cài đặt
 
