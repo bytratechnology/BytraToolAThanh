@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec — Windows: .exe | macOS: .app"""
 
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,9 @@ from branding import APP_BUILD_NAME, APP_NAME
 
 app_bundle_name = f"{APP_NAME}.app"
 build_name = APP_BUILD_NAME
+
+# CI: PYINSTALLER_TARGET_ARCH=universal2 để chạy cả Intel + Apple Silicon
+_mac_target_arch = os.environ.get("PYINSTALLER_TARGET_ARCH", "").strip() or None
 
 datas = [(str(project_dir / "A_THANH"), "A_THANH")]
 
@@ -64,7 +68,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch=None,
+    target_arch=_mac_target_arch,
     codesign_identity=None,
     entitlements_file=None,
 )

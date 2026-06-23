@@ -8,11 +8,16 @@ File ".pkg" trong build/ KHONG phai bo cai macOS.
 
 TREN macOS
 ----------
-1. Chay build_mac.sh (hoac da build san)
+1. Chay build_mac.sh (hoac tai zip tu GitHub Actions)
 2. Mo thu muc: dist/
 3. Double-click: Phần mềm tự động hoá.app
 
 File zip de gui nguoi dung: dist/PhanMemTuDongHoa-macOS.zip
+
+Ban GitHub Actions (universal2): chay duoc ca Mac Intel va Apple Silicon.
+
+Neu zip cu bao "not supported on this Mac": build lai (push main) hoac
+chay local: bash build_mac.sh tren chinh may Mac do.
 
 Neu macOS chan (khong mo duoc):
   - Click phai app -> Mo -> Xac nhan Mo

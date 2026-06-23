@@ -25,6 +25,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build with PyInstaller
+        env:
+          PYINSTALLER_TARGET_ARCH: universal2
         run: pyinstaller BytraImperfectionProcessor.spec --noconfirm --clean
 
       - name: Package .app as zip
