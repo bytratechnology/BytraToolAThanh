@@ -75,6 +75,13 @@ class ProjectPaths:
     def matlab_script_name(self) -> str:
         return self.matlab_output.stem
 
+    @property
+    def abaqus_script_output(self) -> Path:
+        return self.output_dir / "abaqus_run_imperfection.py"
+
+    def abaqus_result_file(self, job_name: str) -> Path:
+        return self.output_dir / f"{job_name}_RESULT.txt"
+
     def validate_sources(self):
         """Kiểm tra file nguồn tồn tại."""
         missing = []

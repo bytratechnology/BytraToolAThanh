@@ -12,3 +12,7 @@ outputFile/
 installer/Output/
 .DS_Store
 Thumbs.db
+*.MOV
+*.mov
+abaqus_path.txt
+matlab_path.txt

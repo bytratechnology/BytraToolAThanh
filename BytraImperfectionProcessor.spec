@@ -17,6 +17,9 @@ build_name = APP_BUILD_NAME
 datas = [(str(project_dir / "A_THANH"), "A_THANH")]
 
 hiddenimports = [
+    "abaqus_config",
+    "abaqus_runner",
+    "abaqus_writer",
     "app_runtime",
     "branding",
     "file_io",

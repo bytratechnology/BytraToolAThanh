@@ -4,6 +4,14 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from abaqus_config import (
+    auto_configure_abaqus,
+    config_file_path,
+    is_valid_abaqus_command,
+    save_abaqus_command,
+    search_abaqus_candidates,
+)
+from abaqus_runner import run_abaqus_analysis
 from branding import APP_NAME, APP_TAGLINE
 from inputs import (
     CALCULATED_FIELD_LABELS,
@@ -42,7 +50,7 @@ INPUT_SECTIONS = [
 ]
 
 STEP1_BUTTON_TEXT = "Bước 1 — Xử lý .inp (Excel, Matrix, MATLAB)"
-STEP2_BUTTON_TEXT = "Bước 2 — Tính toán & Chạy incorporation"
+STEP2_BUTTON_TEXT = "Bước 2 — Tính toán, incorporation & Abaqus"
 
 PATH_FIELDS = [
     ("inp_source", "File .inp nguồn", "file", [("Abaqus INP", "*.inp"), ("All", "*.*")]),
@@ -71,6 +79,10 @@ class InputForm(tk.Tk):
         self.result_labels: dict[str, ttk.Label] = {}
         self.run_button: ttk.Button | None = None
         self.process_button: ttk.Button | None = None
+        self.abaqus_job_entry: ttk.Entry | None = None
+        self.abaqus_path_var: tk.StringVar | None = None
+        self.abaqus_status_label: ttk.Label | None = None
+        self.run_abaqus_var: tk.BooleanVar | None = None
         self.status_label: ttk.Label | None = None
         self.output_hint_label: ttk.Label | None = None
         self.log_text: scrolledtext.ScrolledText | None = None
@@ -79,6 +91,8 @@ class InputForm(tk.Tk):
 
         self._setup_style()
         self._build_ui()
+        auto_configure_abaqus()
+        self._refresh_abaqus_status()
         self._center_window()
 
     def _setup_style(self):
@@ -119,7 +133,7 @@ class InputForm(tk.Tk):
         ttk.Label(header, text=APP_TAGLINE, style="Sub.TLabel").pack(anchor="w", pady=(2, 0))
         ttk.Label(
             header,
-            text="Chọn file, bấm Bước 1 để xử lý, nhập tham số rồi bấm Bước 2",
+            text="Bước 1 → nhập tham số → Bước 2 (incorporation + Abaqus tự động)",
             style="Sub.TLabel",
         ).pack(anchor="w", pady=(4, 0))
 
@@ -223,6 +237,60 @@ class InputForm(tk.Tk):
         )
         self.run_button.pack(fill="x")
 
+        abaqus_frame = ttk.LabelFrame(
+            scroll_body,
+            text="  Abaqus (sau Bước 2)  ",
+            style="Section.TLabelframe",
+            padding=(12, 10),
+        )
+        abaqus_frame.pack(fill="x", pady=(10, 0))
+        abaqus_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            abaqus_frame,
+            text="Tên job (để trống = tự lấy từ .inp)",
+            style="Field.TLabel",
+        ).grid(row=0, column=0, sticky="e", padx=(0, 12), pady=5)
+        self.abaqus_job_entry = ttk.Entry(abaqus_frame, font=("Helvetica", 11))
+        self.abaqus_job_entry.grid(row=0, column=1, sticky="ew", pady=5)
+
+        self.run_abaqus_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            abaqus_frame,
+            text="Chạy phân tích Abaqus tự động sau khi tạo *_IMPERFECTION.inp",
+            variable=self.run_abaqus_var,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        ttk.Label(abaqus_frame, text="Lệnh Abaqus", style="Field.TLabel").grid(
+            row=2, column=0, sticky="e", padx=(0, 12), pady=5
+        )
+        self.abaqus_path_var = tk.StringVar()
+        abaqus_path_entry = ttk.Entry(
+            abaqus_frame,
+            textvariable=self.abaqus_path_var,
+            font=("Helvetica", 10),
+        )
+        abaqus_path_entry.grid(row=2, column=1, sticky="ew", pady=5)
+        abaqus_path_entry.bind("<FocusOut>", lambda _e: self._refresh_abaqus_status())
+
+        abaqus_btn_frame = ttk.Frame(abaqus_frame)
+        abaqus_btn_frame.grid(row=2, column=2, padx=(6, 0), pady=5)
+        ttk.Button(
+            abaqus_btn_frame,
+            text="…",
+            width=3,
+            command=self._browse_abaqus,
+        ).pack(side="left")
+        ttk.Button(
+            abaqus_btn_frame,
+            text="Tìm",
+            width=4,
+            command=self._auto_find_abaqus,
+        ).pack(side="left", padx=(4, 0))
+
+        self.abaqus_status_label = ttk.Label(abaqus_frame, text="", style="Sub.TLabel")
+        self.abaqus_status_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
         self.status_label = ttk.Label(
             action_frame,
             text="Sẵn sàng.",
@@ -270,6 +338,78 @@ class InputForm(tk.Tk):
             )
             value_label.grid(row=row, column=1, sticky="w", pady=4)
             self.result_labels[field_name] = value_label
+
+    def _refresh_abaqus_status(self):
+        if not self.abaqus_status_label:
+            return
+        hint = self.abaqus_path_var.get().strip() if self.abaqus_path_var else ""
+        saved = auto_configure_abaqus(hint or None)
+        if self.abaqus_path_var and not hint and saved:
+            self.abaqus_path_var.set(saved)
+        check = (self.abaqus_path_var.get().strip() if self.abaqus_path_var else "") or saved
+        if check and is_valid_abaqus_command(check):
+            self.abaqus_status_label.configure(
+                text=f"Sẵn sàng Abaqus — {check}",
+                foreground="#1a5276",
+            )
+            return
+        self.abaqus_status_label.configure(
+            text=(
+                "Chưa có Abaqus — cài SIMULIA rồi bấm 「Tìm」 hoặc chọn abaqus.bat "
+                f"({config_file_path().name})"
+            ),
+            foreground="#a04000",
+        )
+
+    def _browse_abaqus(self):
+        path = filedialog.askopenfilename(
+            title="Chọn lệnh Abaqus (abaqus.bat)",
+            filetypes=[
+                ("Abaqus", "abaqus.bat;abq*.bat"),
+                ("Batch", "*.bat"),
+                ("All", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            save_abaqus_command(path)
+        except (ValueError, FileNotFoundError) as exc:
+            messagebox.showerror("Lỗi Abaqus", str(exc))
+            return
+        if self.abaqus_path_var:
+            self.abaqus_path_var.set(path)
+        self._refresh_abaqus_status()
+        self._log(f"Đã chọn Abaqus: {path}")
+
+    def _auto_find_abaqus(self):
+        candidates = search_abaqus_candidates()
+        if not candidates:
+            messagebox.showwarning(
+                "Không tìm thấy Abaqus",
+                "Không tìm thấy abaqus.bat trên máy.\n\n"
+                "Cài Abaqus (SIMULIA) hoặc chọn thủ công file abaqus.bat.",
+            )
+            self._refresh_abaqus_status()
+            return
+        chosen = candidates[0]
+        try:
+            save_abaqus_command(chosen)
+        except OSError:
+            pass
+        if self.abaqus_path_var:
+            self.abaqus_path_var.set(chosen)
+        self._refresh_abaqus_status()
+        self._log(f"Đã tìm thấy Abaqus: {chosen}")
+        if len(candidates) > 1:
+            self._log(f"(Có {len(candidates)} bản cài — dùng bản đầu tiên)")
+
+    def _get_abaqus_cmd_hint(self) -> str | None:
+        if self.abaqus_path_var:
+            text = self.abaqus_path_var.get().strip()
+            if text:
+                return text
+        return None
 
     def get_paths(self) -> ProjectPaths:
         inp_out_text = self.path_vars["inp_output"].get().strip()
@@ -465,22 +605,79 @@ class InputForm(tk.Tk):
         ).start()
 
     def _run_matlab_thread(self, paths: ProjectPaths):
+        run_abaqus = bool(self.run_abaqus_var and self.run_abaqus_var.get())
+        abaqus_error = None
+        abaqus_msg = ""
         try:
             detail = run_matlab_script(paths=paths, on_progress=self._log)
+            inp_result = paths.inp_result
+            if run_abaqus and inp_result.is_file():
+                self.after(
+                    0,
+                    lambda: self._set_status("Bước 2: incorporation xong, đang chạy Abaqus…"),
+                )
+                job_name = ""
+                if self.abaqus_job_entry:
+                    job_name = self.abaqus_job_entry.get().strip()
+                try:
+                    abaqus_result = run_abaqus_analysis(
+                        inp_result,
+                        work_dir=paths.output_dir,
+                        script_output=paths.abaqus_script_output,
+                        job_name=job_name or None,
+                        abaqus_cmd=self._get_abaqus_cmd_hint(),
+                        on_progress=self._log,
+                    )
+                    abaqus_msg = abaqus_result.summary()
+                    detail = f"{detail}\n{abaqus_msg}"
+                except Exception as exc:
+                    abaqus_error = str(exc)
+                    self._log(f"Bước 2: Abaqus phân tích thất bại — {abaqus_error}")
+            elif run_abaqus:
+                self._log(
+                    f"Bước 2: Không chạy Abaqus — chưa có {inp_result.name}."
+                )
         except Exception as exc:
             error_msg = str(exc)
             self.after(0, lambda msg=error_msg: self._on_matlab_failed(msg))
             return
-        self.after(0, lambda d=detail, p=paths: self._on_matlab_success(d, p))
+        self.after(
+            0,
+            lambda d=detail, p=paths, ae=abaqus_error, am=abaqus_msg: self._on_matlab_success(
+                d, p, ae, am
+            ),
+        )
 
-    def _on_matlab_success(self, detail: str, paths: ProjectPaths):
+    def _on_matlab_success(
+        self,
+        detail: str,
+        paths: ProjectPaths,
+        abaqus_error: str | None = None,
+        abaqus_msg: str = "",
+    ):
         self._end_operation()
+        if abaqus_error:
+            self._set_status("Bước 2 xong — Abaqus phân tích lỗi.")
+            self._log("Bước 2: incorporation hoàn tất; phân tích Abaqus thất bại.")
+            messagebox.showwarning(
+                "Bước 2 — incorporation xong, Abaqus lỗi",
+                f"Đã tạo file:\n{paths.inp_result}\n\n"
+                f"Lỗi khi chạy phân tích Abaqus:\n{abaqus_error}",
+            )
+            return
+
         self._set_status("Bước 2 hoàn tất.")
         self._log("Bước 2: Hoàn tất.")
-        messagebox.showinfo(
-            "Bước 2 hoàn tất",
-            f"Đã tạo file kết quả:\n{paths.inp_result}",
-        )
+        if abaqus_msg:
+            messagebox.showinfo(
+                "Bước 2 hoàn tất",
+                f"Đã tạo file kết quả:\n{paths.inp_result}\n\n{abaqus_msg}",
+            )
+        else:
+            messagebox.showinfo(
+                "Bước 2 hoàn tất",
+                f"Đã tạo file kết quả:\n{paths.inp_result}",
+            )
 
     def _on_matlab_failed(self, error: str):
         self._end_operation()
