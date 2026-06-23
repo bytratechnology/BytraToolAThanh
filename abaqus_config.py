@@ -224,3 +224,20 @@ def run_abaqus_subprocess(
         text=True,
         timeout=timeout,
     )
+
+
+def start_abaqus_subprocess(
+    command: str,
+    args: list[str],
+    *,
+    cwd: Path | str,
+) -> subprocess.Popen:
+    """Khởi chạy Abaqus nền — dùng kèm poll .sta/.odb để biết xong sớm."""
+    argv = build_abaqus_subprocess_args(command, args)
+    return subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )

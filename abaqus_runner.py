@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from abaqus_config import resolve_abaqus_command, run_abaqus_subprocess
+from abaqus_config import (
+    resolve_abaqus_command,
+    run_abaqus_subprocess,
+    start_abaqus_subprocess,
+)
 from file_io import write_text
 
 IMPFECTION_SUFFIXES = ("_IMPERFECTION", "-IMPERFECTION", "_IMPFECTION", "-IMPFECTION")
 CPUS = 2
 MEMORY = "90%"
 DATACHECK_TIMEOUT = 900
-ANALYSIS_TIMEOUT = 7200
-COMPLETION_POLL_SECONDS = 120
+ANALYSIS_MAX_WAIT_SECONDS = 7200  # giới hạn tối đa — xong sớm thì lấy sớm
+POLL_INTERVAL_SECONDS = 2
 
 
 @dataclass
@@ -168,12 +173,65 @@ def _read_sta_tail(work_dir: Path, job_name: str, lines: int = 8) -> str:
         return ""
 
 
+def _list_job_artifacts(work_dir: Path, job_name: str) -> str:
+    """Liệt kê file liên quan job trong thư mục làm việc (debug khi thiếu .odb)."""
+    work_dir = work_dir.resolve()
+    patterns = (
+        f"{job_name}.*",
+        "*IMPERFECTION*.odb",
+        "*IMPFECTION*.odb",
+        "*.odb",
+        f"{job_name}*.sta",
+        f"{job_name}*.dat",
+    )
+    found: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for path in sorted(work_dir.glob(pattern)):
+            if path.name in seen:
+                continue
+            seen.add(path.name)
+            found.append(path.name)
+    return ", ".join(found) if found else "(không có file .odb/.sta/.dat)"
+
+
+def find_odb_path(work_dir: Path, job_name: str) -> Path | None:
+    """Tìm file .odb — ưu tiên đúng tên job, sau đó .odb mới nhất trong thư mục."""
+    work_dir = work_dir.resolve()
+    primary = work_dir / f"{job_name}.odb"
+    if primary.is_file() and primary.stat().st_size > 0:
+        return primary
+
+    candidates = [
+        p
+        for p in work_dir.glob("*.odb")
+        if p.is_file() and p.stat().st_size > 0
+    ]
+    if not candidates:
+        return None
+
+    job_lower = job_name.lower()
+    for path in candidates:
+        if path.stem.lower() == job_lower:
+            return path
+
+    stem_hint = job_name.split("_IMPERFECTION")[0].lower()
+    for path in candidates:
+        if stem_hint and stem_hint in path.stem.lower():
+            return path
+
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def get_completion_status(work_dir: Path, job_name: str) -> str | None:
     """Trả về 'COMPLETED' nếu job hoàn tất, None nếu chưa xác định."""
-    odb = work_dir / f"{job_name}.odb"
-    if odb.is_file() and odb.stat().st_size > 0:
+    odb = find_odb_path(work_dir, job_name)
+    if odb is not None:
         sta_tail = _read_sta_tail(work_dir, job_name).upper()
         if not sta_tail or "COMPLETED" in sta_tail:
+            return "COMPLETED"
+        # Có .odb hợp lệ — coi như xong dù .sta chưa kịp ghi COMPLETED
+        if odb.stat().st_size > 1024:
             return "COMPLETED"
 
     sta = work_dir / f"{job_name}.sta"
@@ -199,6 +257,40 @@ def _analysis_completed(work_dir: Path, job_name: str) -> bool:
 
 def _analysis_failed(work_dir: Path, job_name: str) -> bool:
     return get_completion_status(work_dir, job_name) == "FAILED"
+
+
+def _read_sta_progress(work_dir: Path, job_name: str) -> str:
+    tail = _read_sta_tail(work_dir, job_name, lines=2).strip()
+    if not tail:
+        return ""
+    return tail.splitlines()[-1].strip()[:100]
+
+
+def _drain_subprocess(process: subprocess.Popen | None, *, grace_seconds: float = 30):
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _raise_if_process_failed(process: subprocess.Popen | None, work_dir: Path, job_name: str, step_label: str):
+    if process is None or process.poll() is None:
+        return
+    if process.returncode == 0 or _analysis_completed(work_dir, job_name):
+        return
+    err = ""
+    if process.stdout:
+        err = (process.stdout.read() or "").strip()
+    if process.stderr:
+        stderr = (process.stderr.read() or "").strip()
+        err = (err + "\n" + stderr).strip() if err else stderr
+    log_tail = _read_job_log_tail(work_dir, job_name)
+    if log_tail:
+        err = (err + "\n\n--- Abaqus log ---\n" + log_tail).strip()
+    raise RuntimeError(err or f"{step_label} thất bại (job={job_name})")
 
 
 def _raise_if_failed(result, work_dir: Path, job_name: str, step_label: str):
@@ -228,10 +320,11 @@ def build_result_summary(
     inp_path: Path,
     *,
     status: str = "COMPLETED",
+    odb_path: Path | None = None,
 ) -> Path:
     """Ghi file tóm tắt kết quả phân tích Abaqus."""
     work_dir = work_dir.resolve()
-    odb = work_dir / f"{job_name}.odb"
+    odb = odb_path or find_odb_path(work_dir, job_name) or (work_dir / f"{job_name}.odb")
     result_file = work_dir / f"{job_name}_RESULT.txt"
     sta_tail = _read_sta_tail(work_dir, job_name)
     dat_tail = _read_job_log_tail(work_dir, job_name, lines=15)
@@ -348,20 +441,18 @@ def _run_cli_datacheck(cmd: str, job_name: str, inp_path: Path, work_dir: Path, 
     _raise_if_failed(result, work_dir, job_name, "Datacheck")
 
 
-def _run_cli_submit(cmd: str, job_name: str, inp_path: Path, work_dir: Path, on_progress):
+def _run_cli_submit(cmd: str, job_name: str, inp_path: Path, work_dir: Path, on_progress) -> subprocess.Popen:
     _notify(on_progress, f"Bước 2: SUBMIT phân tích — job={job_name}")
     args = [
         f"job={job_name}",
         f"input={inp_path.name}",
         f"cpus={CPUS}",
         f"memory={MEMORY}",
-        "mp_mode=threads",
-        "interactive",
+        "ask=off",
     ]
     _notify(on_progress, f"Bước 2: Lệnh: {cmd} {' '.join(args)}")
-    result = run_abaqus_subprocess(cmd, args, cwd=work_dir, timeout=ANALYSIS_TIMEOUT)
-    if result.returncode != 0 and not _analysis_completed(work_dir, job_name):
-        _raise_if_failed(result, work_dir, job_name, "Submit phân tích")
+    _notify(on_progress, "Bước 2: Đã submit — tự kiểm tra .sta/.odb, xong sớm thì lấy ngay…")
+    return start_abaqus_subprocess(cmd, args, cwd=work_dir)
 
 
 def _run_cae_script(
@@ -370,39 +461,66 @@ def _run_cae_script(
     work_dir: Path,
     job_name: str,
     on_progress,
-):
+) -> subprocess.Popen:
     _notify(on_progress, f"Bước 2: Chạy script CAE → {script_path.name}")
-    result = run_abaqus_subprocess(
+    return start_abaqus_subprocess(
         cmd,
         ["cae", f"noGUI={script_path}"],
         cwd=work_dir,
-        timeout=ANALYSIS_TIMEOUT,
     )
-    if result.returncode != 0 and not _analysis_completed(work_dir, job_name):
-        err = (result.stderr or result.stdout or "").strip()
-        log_tail = _read_job_log_tail(work_dir, job_name)
-        if log_tail:
-            err = (err + "\n\n" + log_tail).strip()
-        raise RuntimeError(err or "Script CAE thất bại")
 
 
-def _wait_for_completion(work_dir: Path, job_name: str, on_progress):
-    _notify(on_progress, f"Bước 2: Đang chờ COMPLETED — kiểm tra {job_name}.sta / .odb…")
-    deadline = time.time() + COMPLETION_POLL_SECONDS
+def _wait_for_completion(
+    work_dir: Path,
+    job_name: str,
+    on_progress,
+    process: subprocess.Popen | None = None,
+):
+    _notify(on_progress, f"Bước 2: Theo dõi tiến trình — poll {job_name}.sta / .odb mỗi {POLL_INTERVAL_SECONDS}s…")
+    deadline = time.time() + ANALYSIS_MAX_WAIT_SECONDS
+    last_log = 0.0
+    last_progress = ""
+
     while time.time() < deadline:
         status = get_completion_status(work_dir, job_name)
         if status == "COMPLETED":
-            _notify(on_progress, "Bước 2: CHECK — trạng thái COMPLETED.")
+            odb = find_odb_path(work_dir, job_name)
+            _notify(
+                on_progress,
+                f"Bước 2: COMPLETED → {odb.name if odb else job_name + '.odb'}",
+            )
+            _drain_subprocess(process)
             return
+
         if status == "FAILED":
+            _drain_subprocess(process)
             log_tail = _read_job_log_tail(work_dir, job_name)
             raise RuntimeError(f"Job thất bại (ERROR/ABORT trong .sta).\n{log_tail}".strip())
-        time.sleep(2)
 
+        progress = _read_sta_progress(work_dir, job_name)
+        now = time.time()
+        if progress and progress != last_progress:
+            _notify(on_progress, f"Bước 2: {progress}")
+            last_progress = progress
+            last_log = now
+        elif now - last_log >= 20:
+            _notify(on_progress, "Bước 2: Solver đang chạy, chờ file .odb…")
+            last_log = now
+
+        if process is not None and process.poll() is not None:
+            _raise_if_process_failed(process, work_dir, job_name, "Phân tích Abaqus")
+            if _analysis_completed(work_dir, job_name):
+                continue
+
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+    _drain_subprocess(process)
     if not _analysis_completed(work_dir, job_name):
         log_tail = _read_job_log_tail(work_dir, job_name)
+        artifacts = _list_job_artifacts(work_dir, job_name)
         raise RuntimeError(
-            f"Job chưa COMPLETED (thiếu {job_name}.odb hợp lệ).\n{log_tail}".strip()
+            f"Quá thời gian chờ tối đa ({ANALYSIS_MAX_WAIT_SECONDS // 3600}h) — chưa có {job_name}.odb.\n"
+            f"File trong thư mục: {artifacts}\n\n{log_tail}".strip()
         )
 
 
@@ -436,9 +554,10 @@ def run_abaqus_analysis(
     _notify(on_progress, f"Bước 2: Abaqus → {cmd}")
     _notify(on_progress, f"Bước 2: File → {inp_path.name}  |  Job → {job_name}")
 
+    analysis_proc: subprocess.Popen | None = None
     try:
         _run_cli_datacheck(cmd, job_name, inp_path, work_dir, on_progress)
-        _run_cli_submit(cmd, job_name, inp_path, work_dir, on_progress)
+        analysis_proc = _run_cli_submit(cmd, job_name, inp_path, work_dir, on_progress)
     except RuntimeError as cli_error:
         _notify(on_progress, f"Bước 2: CLI lỗi, thử script CAE — {cli_error}")
         script_path = (script_output or work_dir / "abaqus_run_imperfection.py").resolve()
@@ -454,16 +573,24 @@ def run_abaqus_analysis(
             encoding="mbcs" if sys.platform == "win32" else "utf-8",
         )
         _notify(on_progress, f"Bước 2: Đã ghi script → {script_path.name}")
-        _run_cae_script(cmd, script_path, work_dir, job_name, on_progress)
+        analysis_proc = _run_cae_script(cmd, script_path, work_dir, job_name, on_progress)
 
-    _wait_for_completion(work_dir, job_name, on_progress)
+    _wait_for_completion(work_dir, job_name, on_progress, process=analysis_proc)
 
-    odb = work_dir / f"{job_name}.odb"
+    odb = find_odb_path(work_dir, job_name)
+    if odb is None:
+        artifacts = _list_job_artifacts(work_dir, job_name)
+        raise RuntimeError(
+            f"Không tìm thấy file .odb sau khi chạy (job={job_name}).\n"
+            f"File trong thư mục: {artifacts}"
+        )
+
     result_file = build_result_summary(
         work_dir,
         job_name,
         inp_path,
         status="COMPLETED",
+        odb_path=odb,
     )
     _notify(on_progress, f"Bước 2: Đã ghi file kết quả → {result_file.name}")
 
