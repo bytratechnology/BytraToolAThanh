@@ -82,6 +82,9 @@ class ProjectPaths:
     def abaqus_result_file(self, job_name: str) -> Path:
         return self.output_dir / f"{job_name}_RESULT.txt"
 
+    def abaqus_odb_output(self, job_name: str) -> Path:
+        return self.output_dir / f"{job_name}-TL.odb"
+
     def validate_sources(self):
         """Kiểm tra file nguồn tồn tại."""
         missing = []

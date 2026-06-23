@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +23,9 @@ MEMORY = "90%"
 DATACHECK_TIMEOUT = 900
 ANALYSIS_MAX_WAIT_SECONDS = 7200  # giới hạn tối đa — xong sớm thì lấy sớm
 POLL_INTERVAL_SECONDS = 2
+ODB_STABLE_POLLS = 5  # ~10s dung lượng .odb không đổi
+FINAL_VERIFY_DELAY_SECONDS = 2  # kiểm tra lại lần cuối trước khi báo xong
+ODB_OUTPUT_SUFFIX = "-TL"  # file .odb deliverable: {job}-TL.odb
 
 
 @dataclass
@@ -33,13 +37,26 @@ class AbaqusRunResult:
 
     def summary(self) -> str:
         lines = [
-            f"Phân tích Abaqus hoàn tất (COMPLETED)",
+            f"Phân tích Abaqus hoàn tất — build xong",
             f"→ {self.odb_path.name}",
             f"→ {self.result_file.name}",
         ]
         if self.script_path:
             lines.append(f"→ {self.script_path.name}")
         return "\n".join(lines)
+
+
+def deliverable_odb_path(work_dir: Path, job_name: str) -> Path:
+    """Đường dẫn file .odb output có hậu tố -TL."""
+    return work_dir.resolve() / f"{job_name}{ODB_OUTPUT_SUFFIX}.odb"
+
+
+def publish_odb_output(source_odb: Path, job_name: str) -> Path:
+    """Sao chép .odb gốc từ Abaqus sang {job}-TL.odb sau khi build xong."""
+    source_odb = source_odb.resolve()
+    dest = deliverable_odb_path(source_odb.parent, job_name)
+    shutil.copy2(source_odb, dest)
+    return dest
 
 
 def sanitize_job_name(name: str, *, max_len: int = 38) -> str:
@@ -223,36 +240,164 @@ def find_odb_path(work_dir: Path, job_name: str) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def get_completion_status(work_dir: Path, job_name: str) -> str | None:
-    """Trả về 'COMPLETED' nếu job hoàn tất, None nếu chưa xác định."""
-    odb = find_odb_path(work_dir, job_name)
-    if odb is not None:
-        sta_tail = _read_sta_tail(work_dir, job_name).upper()
-        if not sta_tail or "COMPLETED" in sta_tail:
-            return "COMPLETED"
-        # Có .odb hợp lệ — coi như xong dù .sta chưa kịp ghi COMPLETED
-        if odb.stat().st_size > 1024:
-            return "COMPLETED"
-
+def get_sta_status(work_dir: Path, job_name: str) -> str | None:
+    """Đọc trạng thái từ {job}.sta — COMPLETED | FAILED | None (đang chạy)."""
     sta = work_dir / f"{job_name}.sta"
     if not sta.is_file():
         return None
 
     try:
-        tail = sta.read_text(encoding="utf-8", errors="ignore").splitlines()[-8:]
+        lines = [
+            line.strip()
+            for line in sta.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if line.strip()
+        ]
     except OSError:
         return None
 
-    joined = "\n".join(tail).upper()
-    if "COMPLETED" in joined:
-        return "COMPLETED"
-    if "ERROR" in joined or "ABORT" in joined or "TERMINATED" in joined:
+    if not lines:
+        return None
+
+    recent = [line.upper() for line in lines[-8:]]
+    if any(
+        token in line
+        for line in recent[-3:]
+        for token in ("ERROR", "ABORT", "TERMINATED", "FAILED")
+    ):
         return "FAILED"
+
+    if any("RUNNING" in line or "SUBMITTED" in line for line in recent[-3:]):
+        return None
+
+    # Chỉ tin COMPLETED khi dòng cuối .sta ghi rõ đã xong (tránh step giữa chừng).
+    last = recent[-1]
+    if "COMPLETED" in last and "RUNNING" not in last:
+        return "COMPLETED"
+
     return None
 
 
+def _job_lock_active(work_dir: Path, job_name: str) -> bool:
+    """Abaqus tạo .lck khi job còn chạy — còn file này thì chưa xong."""
+    work_dir = work_dir.resolve()
+    for name in (f"{job_name}.lck", "abaqus.rpy.lock"):
+        if (work_dir / name).is_file():
+            return True
+    return False
+
+
+def get_completion_status(work_dir: Path, job_name: str) -> str | None:
+    """Trả về COMPLETED chỉ khi .sta ghi COMPLETED (không đoán từ .odb đang ghi)."""
+    return get_sta_status(work_dir, job_name)
+
+
+def _odb_file_size(odb: Path | None) -> int | None:
+    if odb is None:
+        return None
+    try:
+        return odb.stat().st_size if odb.is_file() else None
+    except OSError:
+        return None
+
+
+def _is_odb_fully_written(
+    odb: Path | None,
+    *,
+    last_size: int | None,
+    stable_polls: int,
+) -> tuple[bool, int | None, int]:
+    """
+    .odb chỉ coi là xong khi dung lượng không tăng qua ODB_STABLE_POLLS lần poll.
+    Trả về (ready, new_size, new_stable_polls).
+    """
+    size = _odb_file_size(odb)
+    if size is None or size <= 0:
+        return False, size, 0
+
+    if last_size is not None and size == last_size:
+        stable_polls += 1
+    else:
+        stable_polls = 0
+
+    ready = stable_polls >= ODB_STABLE_POLLS - 1
+    return ready, size, stable_polls
+
+
+def _is_build_fully_finished(
+    work_dir: Path,
+    job_name: str,
+    odb: Path | None,
+    *,
+    last_odb_size: int | None,
+    odb_stable_polls: int,
+    process: subprocess.Popen | None,
+) -> tuple[bool, int | None, int, str]:
+    """
+    Chỉ True khi solver thật sự xong:
+    .sta COMPLETED (dòng cuối) + không còn .lck + .odb ổn định + tiến trình Abaqus đã thoát.
+    Trả về (ready, new_size, new_stable_polls, reason_if_not_ready).
+    """
+    if get_sta_status(work_dir, job_name) != "COMPLETED":
+        return False, last_odb_size, odb_stable_polls, "chờ .sta COMPLETED"
+
+    if _job_lock_active(work_dir, job_name):
+        return False, last_odb_size, 0, "job còn file .lck (đang chạy)"
+
+    if odb is None:
+        return False, last_odb_size, 0, "chờ file .odb"
+
+    ready, size, stable_polls = _is_odb_fully_written(
+        odb,
+        last_size=last_odb_size,
+        stable_polls=odb_stable_polls,
+    )
+    if not ready:
+        return False, size, stable_polls, f".odb chưa ổn định ({_format_size(odb)})"
+
+    if process is not None and process.poll() is None:
+        return False, size, stable_polls, "tiến trình Abaqus chưa kết thúc"
+
+    return True, size, stable_polls, ""
+
+
+def _verify_build_finished(work_dir: Path, job_name: str, odb: Path) -> bool:
+    """Xác minh lần cuối: .sta, .lck, dung lượng .odb không đổi sau vài giây."""
+    if get_sta_status(work_dir, job_name) != "COMPLETED":
+        return False
+    if _job_lock_active(work_dir, job_name):
+        return False
+    if not odb.is_file():
+        return False
+
+    try:
+        size_before = odb.stat().st_size
+    except OSError:
+        return False
+
+    if size_before <= 0:
+        return False
+
+    time.sleep(FINAL_VERIFY_DELAY_SECONDS)
+
+    if get_sta_status(work_dir, job_name) != "COMPLETED":
+        return False
+    if _job_lock_active(work_dir, job_name):
+        return False
+
+    try:
+        size_after = odb.stat().st_size
+    except OSError:
+        return False
+
+    return size_after == size_before and size_after > 0
+
+
 def _analysis_completed(work_dir: Path, job_name: str) -> bool:
-    return get_completion_status(work_dir, job_name) == "COMPLETED"
+    if get_sta_status(work_dir, job_name) != "COMPLETED":
+        return False
+    if _job_lock_active(work_dir, job_name):
+        return False
+    return find_odb_path(work_dir, job_name) is not None
 
 
 def _analysis_failed(work_dir: Path, job_name: str) -> bool:
@@ -277,20 +422,8 @@ def _drain_subprocess(process: subprocess.Popen | None, *, grace_seconds: float 
 
 
 def _raise_if_process_failed(process: subprocess.Popen | None, work_dir: Path, job_name: str, step_label: str):
-    if process is None or process.poll() is None:
-        return
-    if process.returncode == 0 or _analysis_completed(work_dir, job_name):
-        return
-    err = ""
-    if process.stdout:
-        err = (process.stdout.read() or "").strip()
-    if process.stderr:
-        stderr = (process.stderr.read() or "").strip()
-        err = (err + "\n" + stderr).strip() if err else stderr
-    log_tail = _read_job_log_tail(work_dir, job_name)
-    if log_tail:
-        err = (err + "\n\n--- Abaqus log ---\n" + log_tail).strip()
-    raise RuntimeError(err or f"{step_label} thất bại (job={job_name})")
+    """Không báo lỗi theo exit code — chỉ tin .sta FAILED / .lck / .odb ổn định."""
+    return
 
 
 def _raise_if_failed(result, work_dir: Path, job_name: str, step_label: str):
@@ -480,22 +613,52 @@ def _wait_for_completion(
     deadline = time.time() + ANALYSIS_MAX_WAIT_SECONDS
     last_log = 0.0
     last_progress = ""
+    last_odb_size: int | None = None
+    odb_stable_polls = 0
+    last_odb_notice = ""
 
     while time.time() < deadline:
-        status = get_completion_status(work_dir, job_name)
-        if status == "COMPLETED":
-            odb = find_odb_path(work_dir, job_name)
-            _notify(
-                on_progress,
-                f"Bước 2: COMPLETED → {odb.name if odb else job_name + '.odb'}",
-            )
-            _drain_subprocess(process)
-            return
-
-        if status == "FAILED":
+        sta_status = get_sta_status(work_dir, job_name)
+        if sta_status == "FAILED":
             _drain_subprocess(process)
             log_tail = _read_job_log_tail(work_dir, job_name)
             raise RuntimeError(f"Job thất bại (ERROR/ABORT trong .sta).\n{log_tail}".strip())
+
+        odb = find_odb_path(work_dir, job_name)
+
+        ready, last_odb_size, odb_stable_polls, pending_reason = _is_build_fully_finished(
+            work_dir,
+            job_name,
+            odb,
+            last_odb_size=last_odb_size,
+            odb_stable_polls=odb_stable_polls,
+            process=process,
+        )
+
+        if ready and odb is not None:
+            if _verify_build_finished(work_dir, job_name, odb):
+                _drain_subprocess(process)
+                _notify(
+                    on_progress,
+                    f"Bước 2: Build xong → {odb.name} ({_format_size(odb)})",
+                )
+                return
+
+            # Xác minh cuối thất bại — reset đếm ổn định, tiếp tục chờ.
+            odb_stable_polls = 0
+            last_odb_size = None
+            notice = f"Bước 2: .odb vẫn đang ghi — chờ ổn định hoàn toàn…"
+            if notice != last_odb_notice:
+                _notify(on_progress, notice)
+                last_odb_notice = notice
+                last_log = time.time()
+        elif pending_reason:
+            now = time.time()
+            notice = f"Bước 2: {pending_reason}…"
+            if notice != last_odb_notice and now - last_log >= 8:
+                _notify(on_progress, notice)
+                last_odb_notice = notice
+                last_log = now
 
         progress = _read_sta_progress(work_dir, job_name)
         now = time.time()
@@ -503,14 +666,12 @@ def _wait_for_completion(
             _notify(on_progress, f"Bước 2: {progress}")
             last_progress = progress
             last_log = now
-        elif now - last_log >= 20:
-            _notify(on_progress, "Bước 2: Solver đang chạy, chờ file .odb…")
+        elif get_sta_status(work_dir, job_name) != "COMPLETED" and now - last_log >= 20:
+            _notify(on_progress, "Bước 2: Solver đang chạy, chờ build xong…")
             last_log = now
 
         if process is not None and process.poll() is not None:
             _raise_if_process_failed(process, work_dir, job_name, "Phân tích Abaqus")
-            if _analysis_completed(work_dir, job_name):
-                continue
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
@@ -518,9 +679,14 @@ def _wait_for_completion(
     if not _analysis_completed(work_dir, job_name):
         log_tail = _read_job_log_tail(work_dir, job_name)
         artifacts = _list_job_artifacts(work_dir, job_name)
+        sta = get_sta_status(work_dir, job_name)
+        odb = find_odb_path(work_dir, job_name)
+        extra = ""
+        if sta == "COMPLETED" and odb is not None:
+            extra = f"\n.sta đã COMPLETED nhưng {odb.name} ({_format_size(odb)}) vẫn đang tăng dung lượng."
         raise RuntimeError(
-            f"Quá thời gian chờ tối đa ({ANALYSIS_MAX_WAIT_SECONDS // 3600}h) — chưa có {job_name}.odb.\n"
-            f"File trong thư mục: {artifacts}\n\n{log_tail}".strip()
+            f"Quá thời gian chờ tối đa ({ANALYSIS_MAX_WAIT_SECONDS // 3600}h) — chưa có .odb hoàn chỉnh.\n"
+            f"File trong thư mục: {artifacts}{extra}\n\n{log_tail}".strip()
         )
 
 
@@ -578,25 +744,28 @@ def run_abaqus_analysis(
     _wait_for_completion(work_dir, job_name, on_progress, process=analysis_proc)
 
     odb = find_odb_path(work_dir, job_name)
-    if odb is None:
+    if odb is None or not _verify_build_finished(work_dir, job_name, odb):
         artifacts = _list_job_artifacts(work_dir, job_name)
         raise RuntimeError(
-            f"Không tìm thấy file .odb sau khi chạy (job={job_name}).\n"
+            f"Build chưa hoàn tất — không thể xác nhận file .odb (job={job_name}).\n"
             f"File trong thư mục: {artifacts}"
         )
+
+    odb_tl = publish_odb_output(odb, job_name)
+    _notify(on_progress, f"Bước 2: Đã xuất {odb_tl.name}")
 
     result_file = build_result_summary(
         work_dir,
         job_name,
         inp_path,
         status="COMPLETED",
-        odb_path=odb,
+        odb_path=odb_tl,
     )
     _notify(on_progress, f"Bước 2: Đã ghi file kết quả → {result_file.name}")
 
     return AbaqusRunResult(
         job_name=job_name,
-        odb_path=odb,
+        odb_path=odb_tl,
         result_file=result_file,
         script_path=script_path,
     )
@@ -604,9 +773,11 @@ def run_abaqus_analysis(
 
 __all__ = [
     "AbaqusRunResult",
-    "build_result_summary",
+    "deliverable_odb_path",
+    "publish_odb_output",
     "find_imperfection_inp",
     "get_completion_status",
+    "get_sta_status",
     "run_abaqus_analysis",
     "validate_imperfection_inp",
 ]
