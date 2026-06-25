@@ -47,6 +47,7 @@ class AbaqusRunResult:
     script_path: Path | None = None
     postprocess: OdbPostprocessResult | None = None
     rf3_report_paths: list[Path] = field(default_factory=list)
+    rf3_xydata_paths: list[Path] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [
@@ -56,6 +57,8 @@ class AbaqusRunResult:
         ]
         for report in self.rf3_report_paths:
             lines.append(f"→ {report.name}")
+        for xydata in self.rf3_xydata_paths:
+            lines.append(f"→ {xydata.name}")
         if self.postprocess and self.postprocess.summary_path:
             lines.append(f"→ {self.postprocess.summary_path.name}")
         if self.script_path:
@@ -631,6 +634,7 @@ def build_result_summary(
     status: str = "COMPLETED",
     odb_path: Path | None = None,
     rf3_report_paths: list[Path] | None = None,
+    rf3_xydata_paths: list[Path] | None = None,
 ) -> Path:
     """Ghi file tóm tắt kết quả phân tích Abaqus."""
     work_dir = work_dir.resolve()
@@ -655,6 +659,12 @@ def build_result_summary(
         lines.append("RF3 reports (sum per node set):")
         for report in rf3_report_paths:
             lines.append(f"  - {report.name}")
+        lines.append("")
+
+    if rf3_xydata_paths:
+        lines.append("XY data (sum RF3):")
+        for xydata in rf3_xydata_paths:
+            lines.append(f"  - {xydata.name}")
         lines.append("")
 
     if sta_tail:
@@ -1016,6 +1026,7 @@ def run_abaqus_analysis(
 
     postprocess: OdbPostprocessResult | None = None
     rf3_report_paths: list[Path] = []
+    rf3_xydata_paths: list[Path] = []
     try:
         postprocess = run_odb_rf3_postprocess(
             odb_tl,
@@ -1025,6 +1036,7 @@ def run_abaqus_analysis(
             on_progress=on_progress,
         )
         rf3_report_paths = postprocess.report_paths
+        rf3_xydata_paths = postprocess.xydata_output_paths
     except Exception as exc:
         _notify(on_progress, f"Bước 3: Post-process RF3 thất bại — {exc}")
 
@@ -1035,6 +1047,7 @@ def run_abaqus_analysis(
         status="COMPLETED",
         odb_path=odb_tl,
         rf3_report_paths=rf3_report_paths,
+        rf3_xydata_paths=rf3_xydata_paths,
     )
     _notify(on_progress, f"Bước 2: Đã ghi file kết quả → {result_file.name}")
 
@@ -1045,6 +1058,7 @@ def run_abaqus_analysis(
         script_path=script_path,
         postprocess=postprocess,
         rf3_report_paths=rf3_report_paths,
+        rf3_xydata_paths=rf3_xydata_paths,
     )
 
 

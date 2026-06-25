@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from abaqus_config import build_abaqus_subprocess_args, resolve_abaqus_command
@@ -21,12 +21,18 @@ DEFAULT_NODE_SETS = (
 class OdbPostprocessResult:
     script_path: Path
     report_paths: list[Path]
+    xydata_output_paths: list[Path] = field(default_factory=list)
     summary_path: Path | None = None
 
 
 def rf3_sum_report_path(work_dir: Path, job_name: str, label: str) -> Path:
     safe = label.replace("-", "_")
     return work_dir.resolve() / f"{job_name}_{safe}_RF3_sum.rpt"
+
+
+def rf3_xydata_output_path(work_dir: Path, job_name: str, label: str) -> Path:
+    """File XY sau sum — {job_name}-{label}-xydata-output.txt"""
+    return work_dir.resolve() / f"{job_name}-{label}-xydata-output.txt"
 
 
 def rf3_summary_path(work_dir: Path, job_name: str) -> Path:
@@ -66,6 +72,22 @@ def _report_path(label):
     return os.path.join(WORK_DIR, JOB_NAME + '_' + safe + '_RF3_sum.rpt')
 
 
+def _xydata_output_path(label):
+    return os.path.join(WORK_DIR, JOB_NAME + '-' + label + '-xydata-output.txt')
+
+
+def _write_xydata_txt(xy_data, path):
+    \"\"\"Ghi cap X Y (time vs RF3 sum) ra file text.\"\"\"
+    with open(path, 'w') as handle:
+        handle.write('X\\tY\\n')
+        try:
+            points = xy_data.data
+        except AttributeError:
+            points = [(xy_data[i][0], xy_data[i][1]) for i in range(len(xy_data))]
+        for pt in points:
+            handle.write('%g\\t%g\\n' % (pt[0], pt[1]))
+
+
 def _extract_and_sum(odb, instance_name, nset_name, label):
     keys_before = set(session.xyDataObjects.keys())
     try:
@@ -94,8 +116,11 @@ def _extract_and_sum(odb, instance_name, nset_name, label):
 
     out_path = _report_path(label)
     session.writeXYReport(fileName=out_path, appendMode=OFF, xyData=(summed, ))
-    print('OK: %s (%d nodes)' % (out_path, len(new_keys)))
-    return out_path
+
+    xydata_path = _xydata_output_path(label)
+    _write_xydata_txt(summed, xydata_path)
+    print('OK: %s (%d nodes) -> %s' % (out_path, len(new_keys), xydata_path))
+    return out_path, xydata_path
 
 
 if not os.path.isfile(ODB_PATH):
@@ -105,10 +130,13 @@ odb = session.openOdb(name=ODB_PATH)
 session.viewports['Viewport: 1'].setValues(displayedObject=odb)
 
 written = []
+xydata_written = []
 for inst, nset, label in [(a, b, b) for a, b in NODE_SETS]:
-    path = _extract_and_sum(odb, inst, nset, label)
-    if path:
-        written.append(path)
+    result = _extract_and_sum(odb, inst, nset, label)
+    if result:
+        rpt_path, xy_path = result
+        written.append(rpt_path)
+        xydata_written.append(xy_path)
 
 summary_path = os.path.join(WORK_DIR, JOB_NAME + '_RF3_SUMMARY.txt')
 with open(summary_path, 'w') as handle:
@@ -116,6 +144,8 @@ with open(summary_path, 'w') as handle:
     handle.write('ODB: ' + ODB_PATH + '\\n')
     for path in written:
         handle.write('REPORT: ' + path + '\\n')
+    for path in xydata_written:
+        handle.write('XYDATA: ' + path + '\\n')
 
 odb.close()
 print('DONE: RF3 post-process -> ' + summary_path)
@@ -175,9 +205,14 @@ def run_odb_rf3_postprocess(
         for _inst, nset in node_sets
         if (path := rf3_sum_report_path(work_dir, job_name, nset)).is_file()
     ]
+    xydata_output_paths = [
+        path
+        for _inst, nset in node_sets
+        if (path := rf3_xydata_output_path(work_dir, job_name, nset)).is_file()
+    ]
     summary = rf3_summary_path(work_dir, job_name)
 
-    if result.returncode != 0 and not report_paths:
+    if result.returncode != 0 and not report_paths and not xydata_output_paths:
         raise RuntimeError(
             f"Post-process ODB thất bại (exit {result.returncode}).\n{log}".strip()
         )
@@ -185,12 +220,15 @@ def run_odb_rf3_postprocess(
     if on_progress:
         for path in report_paths:
             on_progress(f"Bước 3: Đã ghi {path.name}")
+        for path in xydata_output_paths:
+            on_progress(f"Bước 3: XY data → {path.name}")
         if summary.is_file():
             on_progress(f"Bước 3: Tóm tắt → {summary.name}")
 
     return OdbPostprocessResult(
         script_path=script_path,
         report_paths=report_paths,
+        xydata_output_paths=xydata_output_paths,
         summary_path=summary if summary.is_file() else None,
     )
 
@@ -201,6 +239,7 @@ __all__ = [
     "build_rf3_postprocess_script",
     "postprocess_script_path",
     "rf3_sum_report_path",
+    "rf3_xydata_output_path",
     "rf3_summary_path",
     "run_odb_rf3_postprocess",
 ]

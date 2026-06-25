@@ -89,6 +89,9 @@ class ProjectPaths:
         safe = node_set.replace("-", "_")
         return self.output_dir / f"{job_name}_{safe}_RF3_sum.rpt"
 
+    def abaqus_rf3_xydata_output(self, job_name: str, node_set: str) -> Path:
+        return self.output_dir / f"{job_name}-{node_set}-xydata-output.txt"
+
     def validate_sources(self):
         """Kiểm tra file nguồn tồn tại."""
         missing = []
