@@ -59,7 +59,7 @@ def build_rf3_postprocess_script(
     node_sets_literal = repr(list(node_sets))
 
     return f"""# -*- coding: mbcs -*-
-# RF3: Node Set BC-1/BC-2 -> moi frame Total_RF3 = sum RF3 tat ca node -> XY (X=time, Y=Total_RF3)
+# Giong CAE: ODB field output RF.RF3, Unique Nodal, Node set BC-1/BC-2, sum tung node -> XY
 from odbAccess import openOdb
 from abaqusConstants import NODAL
 import os
@@ -172,19 +172,52 @@ def _find_step(odb):
     return best_name, best
 
 
-def _sum_rf3_region_frame(rf_field, region, debug=False):
-    # Total_RF3 = RF3_node1 + RF3_node2 + ... + RF3_nodeN (qua getSubset region)
+def _rf3_from_node(rf_field, node):
+    # RF3 Unique Nodal tai 1 node (nhu CAE: RF:RF3 at part instance ... node N)
+    for pos in RF_POSITIONS:
+        try:
+            subset = rf_field.getSubset(region=node, position=pos)
+            vals = subset.values
+            if vals:
+                s = 0.0
+                for v in vals:
+                    s += v.data[2]
+                return s / len(vals), pos
+        except Exception:
+            pass
+    try:
+        subset = rf_field.getSubset(region=node)
+        vals = subset.values
+        if vals:
+            s = 0.0
+            for v in vals:
+                s += v.data[2]
+            return s / len(vals), 'default'
+    except Exception:
+        pass
+    return None, None
+
+
+def _node_key(value):
+    inst = getattr(value, 'instance', None)
+    if inst is not None:
+        try:
+            return (inst.name, value.nodeLabel)
+        except Exception:
+            pass
+    return ('', value.nodeLabel)
+
+
+def _sum_rf3_bulk(rf_field, region, debug=False):
     for pos in RF_POSITIONS:
         try:
             subset = rf_field.getSubset(region=region, position=pos)
             values = subset.values
             if not values:
-                if debug:
-                    print('DEBUG getSubset pos=%s: 0 values' % pos)
                 continue
             by_node = {{}}
             for value in values:
-                key = value.nodeLabel
+                key = _node_key(value)
                 rf3 = value.data[2]
                 if pos == NODAL:
                     if key not in by_node:
@@ -197,34 +230,57 @@ def _sum_rf3_region_frame(rf_field, region, debug=False):
             for acc in by_node.values():
                 total += acc[0] / acc[1]
             if debug:
-                print('DEBUG getSubset pos=%s: %d values, %d nodes, total=%g' % (
+                print('DEBUG bulk pos=%s: %d values, %d nodes, total=%g' % (
                     pos, len(values), len(by_node), total))
             return total, pos, len(by_node)
         except Exception as exc:
             if debug:
-                print('DEBUG getSubset pos=%s failed: %s' % (pos, exc))
+                print('DEBUG bulk pos=%s failed: %s' % (pos, exc))
+    return None, None, 0
+
+
+def _sum_rf3_per_node(rf_field, region, debug=False):
+    # Total_RF3 = RF3_node1 + RF3_node2 + ... + RF3_nodeN (giong Operate on XY sum)
     try:
-        subset = rf_field.getSubset(region=region)
-        values = subset.values
-        if values:
-            by_node = {{}}
-            for value in values:
-                key = value.nodeLabel
-                rf3 = value.data[2]
-                if key not in by_node:
-                    by_node[key] = [0.0, 0]
-                by_node[key][0] += rf3
-                by_node[key][1] += 1
-            total = 0.0
-            for acc in by_node.values():
-                total += acc[0] / acc[1]
-            if debug:
-                print('DEBUG getSubset default: %d values, %d nodes' % (
-                    len(values), len(by_node)))
-            return total, 'default', len(by_node)
-    except Exception as exc:
+        arr = region.nodes
+        n_total = len(arr)
+    except Exception:
+        return None, None, 0
+    if n_total == 0:
+        return None, None, 0
+
+    total = 0.0
+    count = 0
+    pos_used = '?'
+    for i in range(n_total):
+        node = arr[i]
+        rf3, pos = _rf3_from_node(rf_field, node)
+        if rf3 is None:
+            continue
+        total += rf3
+        count += 1
+        pos_used = pos
+
+    if count > 0:
         if debug:
-            print('DEBUG getSubset default failed: %s' % exc)
+            print('DEBUG per-node: %d/%d nodes, total=%g, pos=%s' % (
+                count, n_total, total, pos_used))
+        return total, pos_used, count
+    return None, None, 0
+
+
+def _sum_rf3_region_frame(rf_field, region, debug=False):
+    n_expect = _region_node_count(region)
+    result = _sum_rf3_per_node(rf_field, region, debug=debug)
+    if result[0] is not None:
+        return result
+    if debug:
+        print('DEBUG per-node failed, try bulk getSubset')
+    result = _sum_rf3_bulk(rf_field, region, debug=debug)
+    if result[0] is not None:
+        return result
+    if debug:
+        print('DEBUG all methods failed (expected ~%d nodes)' % n_expect)
     return None, None, 0
 
 
@@ -312,7 +368,7 @@ if missing:
 
 summary_path = os.path.join(WORK_DIR, JOB_NAME + '_RF3_SUMMARY.txt')
 with open(summary_path, 'w') as handle:
-    handle.write('RF3: sum RF3 of all nodes in Node Set per frame -> XYDATA\\n')
+    handle.write('Method: RF.RF3 Unique Nodal per node in BC node set, sum -> XYDATA\\n')
     handle.write('X = frame time / arc length; Y = Total_RF3\\n')
     handle.write('ODB: ' + ODB_PATH + '\\n')
     for path in xydata_written:
@@ -384,7 +440,7 @@ def run_odb_rf3_postprocess(
     write_abaqus_script(script_path, script_content)
 
     if on_progress:
-        on_progress("Bước 3: Post-process ODB — Total_RF3 (sum all nodes BC-1/BC-2)…")
+        on_progress("Bước 3: RF3 Unique Nodal — sum BC-1/BC-2 (giong CAE)…")
 
     cmd = resolve_abaqus_command(abaqus_cmd)
     result, log = _run_postprocess_script(cmd, script_path, work_dir, POSTPROCESS_TIMEOUT)
