@@ -1,4 +1,4 @@
-"""Post-process .odb — RF3 (Unique Nodal) từ BC-1/BC-2, sum, xuất báo cáo."""
+"""Post-process .odb — RF3: tong RF3 moi node trong Node Set (BC-1/BC-2) theo frame, xuat XY."""
 
 from __future__ import annotations
 
@@ -53,13 +53,13 @@ def build_rf3_postprocess_script(
     job_name: str,
     node_sets: tuple[tuple[str, str], ...] = DEFAULT_NODE_SETS,
 ) -> str:
-    """Sinh script abaqus python — doc RF3 tu ODB, sum BC-1/BC-2, ghi xydata txt."""
+    """Sinh script abaqus python — doc RF3 tung node trong Node Set, cong tong moi frame, ghi XY."""
     work = str(work_dir.resolve()).replace("\\", "/")
     odb = str(odb_path.resolve()).replace("\\", "/")
     node_sets_literal = repr(list(node_sets))
 
     return f"""# -*- coding: mbcs -*-
-# RF3 sum BC-1/BC-2 via odbAccess (abaqus python — khong can viewer xyDataObjects)
+# RF3: lay TOAN BO node trong Node Set, moi frame cong tong RF3 -> XY (X=time/frame, Y=Total_RF3)
 from odbAccess import openOdb
 from abaqusConstants import NODAL
 import os
@@ -75,6 +75,7 @@ try:
     from abaqusConstants import UNIQUE_NODAL
     RF_POSITIONS = (UNIQUE_NODAL, NODAL)
 except ImportError:
+    UNIQUE_NODAL = None
     RF_POSITIONS = (NODAL,)
 
 
@@ -159,23 +160,55 @@ def _find_step(odb):
     return best_name, best
 
 
-def _rf3_subset_sum(rf_field, region):
+def _node_labels_in_set(region):
+    # Toan bo node label trong Node Set
+    return [node.label for node in region.nodes]
+
+
+def _total_rf3_for_frame(rf_field, region, node_labels):
+    # Total_RF3 = RF3_node1 + RF3_node2 + ... + RF3_nodeN
+    # Uu tien UNIQUE_NODAL; fallback NODAL: trung binh theo node roi cong
+    label_set = set(node_labels)
     for pos in RF_POSITIONS:
         try:
             subset = rf_field.getSubset(region=region, position=pos)
-            values = subset.values
-            if values:
-                return sum(v.data[2] for v in values), pos
+            node_rf3 = {{}}
+            for value in subset.values:
+                label = value.nodeLabel
+                if label not in label_set:
+                    continue
+                rf3 = value.data[2]
+                if pos == NODAL:
+                    if label not in node_rf3:
+                        node_rf3[label] = [0.0, 0]
+                    node_rf3[label][0] += rf3
+                    node_rf3[label][1] += 1
+                else:
+                    node_rf3[label] = [rf3, 1]
+            if not node_rf3:
+                continue
+            total = sum(acc[0] / acc[1] for acc in node_rf3.values())
+            return total, pos, len(node_rf3)
         except Exception:
             pass
     try:
         subset = rf_field.getSubset(region=region)
-        values = subset.values
-        if values:
-            return sum(v.data[2] for v in values), 'default'
+        node_rf3 = {{}}
+        for value in subset.values:
+            label = value.nodeLabel
+            if label not in label_set:
+                continue
+            rf3 = value.data[2]
+            if label not in node_rf3:
+                node_rf3[label] = [0.0, 0]
+            node_rf3[label][0] += rf3
+            node_rf3[label][1] += 1
+        if node_rf3:
+            total = sum(acc[0] / acc[1] for acc in node_rf3.values())
+            return total, 'default', len(node_rf3)
     except Exception:
         pass
-    return None, None
+    return None, None, 0
 
 
 def _extract_rf3_xy(odb, inst_name, nset_name):
@@ -184,6 +217,13 @@ def _extract_rf3_xy(odb, inst_name, nset_name):
     if region is None:
         print('FAIL region %s %s' % (inst_name, nset_name))
         return None
+
+    node_labels = _node_labels_in_set(region)
+    if not node_labels:
+        print('FAIL empty node set %s' % nset_name)
+        return None
+    print('NSET %s: %d nodes (labels %d..%d)' % (
+        nset_name, len(node_labels), min(node_labels), max(node_labels)))
 
     step_name, step = _find_step(odb)
     if step is None:
@@ -194,19 +234,21 @@ def _extract_rf3_xy(odb, inst_name, nset_name):
     points = []
     last_pos = '?'
     for frame in step.frames:
-        t = frame.frameValue
+        x_time = frame.frameValue
         if 'RF' not in frame.fieldOutputs.keys():
             continue
-        rf3_sum, pos = _rf3_subset_sum(frame.fieldOutputs['RF'], region)
-        if rf3_sum is None:
+        total_rf3, pos, n_matched = _total_rf3_for_frame(
+            frame.fieldOutputs['RF'], region, node_labels)
+        if total_rf3 is None:
             continue
         last_pos = pos
-        points.append((t, rf3_sum))
+        points.append((x_time, total_rf3))
 
     if not points:
         print('FAIL no RF3 data for %s' % nset_name)
         return None
-    print('OK RF3 sum %s: %d points (pos=%s)' % (nset_name, len(points), last_pos))
+    print('OK %s: %d XY points, %d nodes summed/frame (pos=%s)' % (
+        nset_name, len(points), len(node_labels), last_pos))
     return points
 
 
@@ -215,12 +257,13 @@ def _xydata_output_path(label):
 
 
 def _write_xydata_points(points, path):
+    # X = Time hoac Arc length (frameValue); Y = Total_RF3
     yvals = [p[1] for p in points]
     with open(path, 'w') as handle:
         handle.write('X\\tY\\n')
-        for x, y in points:
-            handle.write('%g\\t%g\\n' % (x, y))
-    print('WROTE xydata %d points, Y=[%g .. %g] -> %s' % (
+        for x_time, total_rf3 in points:
+            handle.write('%g\\t%g\\n' % (x_time, total_rf3))
+    print('WROTE XYDATA %d rows (X=time/frame, Y=Total_RF3), Y=[%g .. %g] -> %s' % (
         len(points), min(yvals), max(yvals), path))
 
 
@@ -253,7 +296,8 @@ if missing:
 
 summary_path = os.path.join(WORK_DIR, JOB_NAME + '_RF3_SUMMARY.txt')
 with open(summary_path, 'w') as handle:
-    handle.write('RF3 post-process (odbAccess sum per node set)\\n')
+    handle.write('RF3: sum RF3 of all nodes in Node Set per frame -> XYDATA\\n')
+    handle.write('X = frame time / arc length; Y = Total_RF3\\n')
     handle.write('ODB: ' + ODB_PATH + '\\n')
     for path in xydata_written:
         handle.write('XYDATA: ' + path + '\\n')
@@ -324,7 +368,7 @@ def run_odb_rf3_postprocess(
     write_abaqus_script(script_path, script_content)
 
     if on_progress:
-        on_progress("Bước 3: Post-process ODB — RF3 sum BC-1/BC-2 (odbAccess)…")
+        on_progress("Bước 3: Post-process ODB — Total_RF3 (sum all nodes BC-1/BC-2)…")
 
     cmd = resolve_abaqus_command(abaqus_cmd)
     result, log = _run_postprocess_script(cmd, script_path, work_dir, POSTPROCESS_TIMEOUT)
