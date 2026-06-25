@@ -1043,7 +1043,7 @@ def run_abaqus_analysis(
             job_name=job_name,
             imperfection_inp=inp_path,
             run_time_seconds=elapsed,
-            model_name=inp_path.stem.replace("_IMPERFECTION", ""),
+            model_name=inp_path.name,
             on_progress=on_progress,
         )
     except Exception as exc:

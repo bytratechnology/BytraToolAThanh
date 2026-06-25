@@ -190,7 +190,7 @@ def finalize_model_deliverables(
     )
     removed = cleanup_model_output_dir(output_dir, keep_paths=keep)
 
-    label = model_name or imperfection_inp.stem.replace("_IMPERFECTION", "")
+    label = model_name or imperfection_inp.name
     excel_path = summary_excel_path(output_dir.parent)
     upsert_summary_row(
         excel_path,
