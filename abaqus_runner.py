@@ -27,6 +27,7 @@ from abaqus_job_settings import (
 )
 from abaqus_postprocess import OdbPostprocessResult, run_odb_rf3_postprocess
 from file_io import write_abaqus_script, write_text
+from result_deliverables import finalize_model_deliverables, summary_excel_path
 
 IMPFECTION_SUFFIXES = ("_IMPERFECTION", "-IMPERFECTION", "_IMPFECTION", "-IMPFECTION")
 DATACHECK_TIMEOUT = 900
@@ -43,28 +44,28 @@ ODB_OUTPUT_SUFFIX = "-TL"  # file .odb deliverable: {job}-TL.odb
 class AbaqusRunResult:
     job_name: str
     odb_path: Path
-    result_file: Path
+    result_file: Path | None = None
     script_path: Path | None = None
     postprocess: OdbPostprocessResult | None = None
     rf3_report_paths: list[Path] = field(default_factory=list)
     rf3_xydata_paths: list[Path] = field(default_factory=list)
+    bc1_xydata_path: Path | None = None
+    max_rf3_bc1: float | None = None
+    elapsed_seconds: float = 0.0
 
     def summary(self) -> str:
         lines = [
             "Phân tích Abaqus hoàn tất — build xong",
             f"→ {self.odb_path.name}",
-            f"→ {self.result_file.name}",
         ]
-        for report in self.rf3_report_paths:
-            lines.append(f"→ {report.name}")
-        for xydata in self.rf3_xydata_paths:
-            lines.append(f"→ {xydata.name}")
-        if self.postprocess and self.postprocess.summary_path:
-            lines.append(f"→ {self.postprocess.summary_path.name}")
-        if self.script_path:
-            lines.append(f"→ {self.script_path.name}")
-        if self.postprocess and self.postprocess.script_path:
-            lines.append(f"→ {self.postprocess.script_path.name}")
+        if self.bc1_xydata_path:
+            lines.append(f"→ {self.bc1_xydata_path.name}")
+        if self.max_rf3_bc1 is not None:
+            lines.append(f"→ Max RF3 (BC-1) = {self.max_rf3_bc1:g}")
+        if self.elapsed_seconds > 0:
+            from result_deliverables import format_duration
+
+            lines.append(f"→ Thời gian chạy: {format_duration(self.elapsed_seconds)}")
         return "\n".join(lines)
 
 
@@ -990,6 +991,7 @@ def run_abaqus_analysis(
     if patch_inp_riks_no_max_lpf(inp_path):
         _notify(on_progress, "Bước 2: Đã chỉnh .inp — *Static, riks không giới hạn maxLPF")
 
+    started_at = time.monotonic()
     analysis_proc: subprocess.Popen | None = None
     try:
         job_name = _run_cli_analysis_with_cpu_retries(
@@ -1023,6 +1025,8 @@ def run_abaqus_analysis(
     postprocess: OdbPostprocessResult | None = None
     rf3_report_paths: list[Path] = []
     rf3_xydata_paths: list[Path] = []
+    bc1_xydata_path: Path | None = None
+    max_rf3_bc1: float | None = None
     try:
         postprocess = run_odb_rf3_postprocess(
             odb_tl,
@@ -1033,28 +1037,33 @@ def run_abaqus_analysis(
         )
         rf3_report_paths = postprocess.report_paths
         rf3_xydata_paths = postprocess.xydata_output_paths
+        elapsed = time.monotonic() - started_at
+        bc1_xydata_path, max_rf3_bc1, _removed = finalize_model_deliverables(
+            work_dir,
+            job_name=job_name,
+            imperfection_inp=inp_path,
+            run_time_seconds=elapsed,
+            model_name=inp_path.stem.replace("_IMPERFECTION", ""),
+            on_progress=on_progress,
+        )
     except Exception as exc:
-        _notify(on_progress, f"Bước 3: Post-process RF3 thất bại — {exc}")
+        _notify(on_progress, f"Bước 3: Post-process / tổng hợp thất bại — {exc}")
 
-    result_file = build_result_summary(
-        work_dir,
-        job_name,
-        inp_path,
-        status="COMPLETED",
-        odb_path=odb_tl,
-        rf3_report_paths=rf3_report_paths,
-        rf3_xydata_paths=rf3_xydata_paths,
-    )
-    _notify(on_progress, f"Bước 2: Đã ghi file kết quả → {result_file.name}")
+    elapsed_seconds = time.monotonic() - started_at
+    if max_rf3_bc1 is not None:
+        _notify(on_progress, f"Bước 3: Excel tổng hợp → {summary_excel_path(work_dir.parent).name}")
 
     return AbaqusRunResult(
         job_name=job_name,
         odb_path=odb_tl,
-        result_file=result_file,
+        result_file=None,
         script_path=script_path,
         postprocess=postprocess,
         rf3_report_paths=rf3_report_paths,
         rf3_xydata_paths=rf3_xydata_paths,
+        bc1_xydata_path=bc1_xydata_path,
+        max_rf3_bc1=max_rf3_bc1,
+        elapsed_seconds=elapsed_seconds,
     )
 
 

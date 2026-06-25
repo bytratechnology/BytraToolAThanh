@@ -24,6 +24,8 @@ class BatchModelResult:
     success: bool
     detail: str = ""
     error: str | None = None
+    max_rf3_bc1: float | None = None
+    run_time_seconds: float | None = None
 
 
 IMPERFECTION_MARKERS = ("IMPERFECTION", "IMPFECTION")
@@ -142,6 +144,7 @@ def run_single_model_pipeline(
         detail = run_matlab_script(paths=paths, on_progress=on_progress)
         inp_result = paths.inp_result
 
+        abaqus_result = None
         if run_abaqus and inp_result.is_file():
             log("Bước 2: Chạy Abaqus…")
             abaqus_result = run_abaqus_analysis(
@@ -160,6 +163,8 @@ def run_single_model_pipeline(
             output_dir=paths.output_dir,
             success=True,
             detail=detail,
+            max_rf3_bc1=abaqus_result.max_rf3_bc1 if abaqus_result else None,
+            run_time_seconds=abaqus_result.elapsed_seconds if abaqus_result else None,
         )
     except Exception as exc:
         return BatchModelResult(

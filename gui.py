@@ -29,6 +29,7 @@ from inputs import (
 )
 from main import run_processing
 from paths import DEFAULT_PATHS, ProjectPaths
+from result_deliverables import format_duration, summary_excel_path
 
 INPUT_SECTIONS = [
     (
@@ -980,10 +981,19 @@ class InputForm(tk.Tk):
                 self._set_status("Bước 2 hoàn tất.")
                 self._log("Bước 2: Hoàn tất.")
                 self._update_result_labels(result, base_paths, inputs)
+                extra = ""
+                if result.max_rf3_bc1 is not None:
+                    extra = f"\nMax RF3 (BC-1): {result.max_rf3_bc1:g}"
+                if result.run_time_seconds:
+                    extra += f"\nThời gian chạy: {format_duration(result.run_time_seconds)}"
+                excel = summary_excel_path(base_paths.output_dir)
+                if excel.is_file():
+                    extra += f"\nExcel tổng hợp: {excel}"
                 messagebox.showinfo(
                     "Bước 2 hoàn tất",
                     f"Đã xử lý:\n{result.inp_path.name}\n\n"
-                    f"Thư mục kết quả:\n{result.output_dir}",
+                    f"Thư mục kết quả:\n{result.output_dir}"
+                    f"{extra}",
                 )
             else:
                 self._set_status("Bước 2 lỗi.")
@@ -1001,9 +1011,11 @@ class InputForm(tk.Tk):
             else:
                 lines.append(f"✗ {result.inp_path.name}: {result.error}")
 
+        excel = summary_excel_path(base_paths.output_dir)
+        excel_note = f"\n\nExcel tổng hợp:\n{excel}" if excel.is_file() else ""
         messagebox.showinfo(
             "Bước 2 hoàn tất",
-            f"Thành công: {ok}/{len(results)}\n\n" + "\n".join(lines),
+            f"Thành công: {ok}/{len(results)}\n\n" + "\n".join(lines) + excel_note,
         )
 
     def _update_result_labels(

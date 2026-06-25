@@ -37,6 +37,7 @@ hiddenimports = [
     "matlab_runner",
     "matlab_writer",
     "paths",
+    "result_deliverables",
     "gui",
     "main",
 ]

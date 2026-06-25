@@ -12,8 +12,8 @@ from file_io import write_abaqus_script, write_text
 POSTPROCESS_TIMEOUT = 1200
 DEFAULT_NODE_SETS = (
     ("Plate-1", "BC-1"),
-    ("Plate-2", "BC-2"),
 )
+REQUIRED_XY_LABELS = ("BC-1",)
 
 
 @dataclass
@@ -70,7 +70,7 @@ WORK_DIR = r'{work}'
 ODB_PATH = r'{odb}'
 JOB_NAME = '{job_name}'
 NODE_SETS = {node_sets_literal}
-WANTED_LABELS = ('BC-1', 'BC-2')
+WANTED_LABELS = ('BC-1',)
 
 RF_POSITIONS = []
 try:
@@ -503,7 +503,7 @@ def run_odb_rf3_postprocess(
     write_abaqus_script(script_path, script_content)
 
     if on_progress:
-        on_progress("Bước 3: RF3 Unique Nodal — sum BC-1/BC-2 (giong CAE)…")
+        on_progress("Bước 3: RF3 Unique Nodal — BC-1 → xydata…")
 
     cmd = resolve_abaqus_command(abaqus_cmd)
     result, log = _run_postprocess_script(cmd, script_path, work_dir, POSTPROCESS_TIMEOUT)
@@ -520,7 +520,7 @@ def run_odb_rf3_postprocess(
     ]
     summary = rf3_summary_path(work_dir, job_name)
 
-    expected_xy = [rf3_xydata_output_path(work_dir, job_name, nset) for _inst, nset in node_sets]
+    expected_xy = [rf3_xydata_output_path(work_dir, job_name, label) for label in REQUIRED_XY_LABELS]
     missing_xy = [path.name for path in expected_xy if not path.is_file()]
     invalid_xy = [
         path.name
@@ -564,6 +564,7 @@ def run_odb_rf3_postprocess(
 
 __all__ = [
     "DEFAULT_NODE_SETS",
+    "REQUIRED_XY_LABELS",
     "OdbPostprocessResult",
     "build_rf3_postprocess_script",
     "postprocess_script_path",
