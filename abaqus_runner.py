@@ -21,6 +21,7 @@ from abaqus_job_settings import (
     cae_job_constructor_snippet,
     cli_job_resource_args,
     patch_inp_riks_no_max_lpf,
+    resolve_job_num_cpus,
 )
 from abaqus_postprocess import OdbPostprocessResult, run_odb_rf3_postprocess
 from file_io import write_text
@@ -674,6 +675,7 @@ def build_abaqus_analysis_script(
     """Script CAE dự phòng — import .inp, submit, chờ COMPLETED."""
     work_path = str(work_dir.resolve()).replace("\\", "/")
     inp_name = inp_path.name
+    cpus = resolve_job_num_cpus()
 
     return f"""# -*- coding: mbcs -*-
 # Generated — chạy: abaqus cae noGUI=abaqus_run_imperfection.py
@@ -699,7 +701,7 @@ print('CHECK: Import model tu file .inp...')
 mdb.ModelFromInputFile(name=model_name, inputFileName=inp_file)
 {cae_configure_riks_steps_snippet()}
 {cae_job_constructor_snippet(model_var="model_name", job_var="job_name")}
-print('CONFIGURE job: memory=75%, cpus=6, mp_mode=THREADS')
+print('CONFIGURE job: memory=75%, cpus={cpus}, mp_mode=THREADS')
 
 print('CHECK: writeInput consistencyChecking=ON...')
 mdb.jobs[job_name].writeInput(consistencyChecking=ON)
@@ -904,9 +906,10 @@ def run_abaqus_analysis(
 
     _notify(on_progress, f"Bước 2: Abaqus → {cmd}")
     _notify(on_progress, f"Bước 2: File → {inp_path.name}  |  Job → {job_name}")
+    cpus = resolve_job_num_cpus()
     _notify(
         on_progress,
-        "Bước 2: Job settings — memory 75%, 6 CPUs, Threads, bỏ max load proportional factor",
+        f"Bước 2: Job settings — memory 75%, {cpus} CPU(s), Threads, bỏ max load proportional factor",
     )
 
     if patch_inp_riks_no_max_lpf(inp_path):

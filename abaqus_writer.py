@@ -2,12 +2,12 @@
 
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from file_io import write_text
 from inputs import ProcessInputs
-from abaqus_job_settings import JOB_MEMORY_PERCENT, JOB_NUM_CPUS, JOB_NUM_DOMAINS
+from abaqus_job_settings import JOB_MEMORY_PERCENT, JOB_NUM_DOMAINS, resolve_job_num_cpus
 
 ORIGINAL_LENGTH = 2420
 DEFAULT_LT_FACTOR = 0.1
@@ -33,7 +33,7 @@ class AbaqusCaeSettings:
     model_name: str = ""
     model_e1: str = ""
     model_e2: str = ""
-    num_cpus: int = JOB_NUM_CPUS
+    num_cpus: int = field(default_factory=resolve_job_num_cpus)
 
 
 def _python_path(path: Path) -> str:

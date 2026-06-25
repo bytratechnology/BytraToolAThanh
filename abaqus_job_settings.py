@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
-# Edit Job (CAE) / CLI
+# Edit Job (CAE) / CLI — ưu tiên tối đa; thực tế = min(máy, JOB_NUM_CPUS)
 JOB_NUM_CPUS = 6
 JOB_MEMORY_PERCENT = 75
 JOB_MP_MODE = "threads"  # Multiprocessing mode: Threads
 JOB_NUM_DOMAINS = 1  # dùng với THREADS (không phải MPI)
 
 
+def resolve_job_num_cpus() -> int:
+    """Số CPU gửi Abaqus — không vượt số lõi/logical CPU của máy."""
+    try:
+        available = os.cpu_count() or 1
+    except (TypeError, OSError):
+        available = 1
+    return max(1, min(JOB_NUM_CPUS, available))
+
+
 def cli_job_resource_args() -> list[str]:
     """Tham số CLI: cpus, memory, mp_mode."""
+    cpus = resolve_job_num_cpus()
     return [
-        f"cpus={JOB_NUM_CPUS}",
+        f"cpus={cpus}",
         f"memory={JOB_MEMORY_PERCENT}%",
         f"mp_mode={JOB_MP_MODE}",
     ]
@@ -42,8 +53,9 @@ def cae_job_constructor_snippet(
     job_var: str,
     description: str = "IMPERFECTION auto submit",
 ) -> str:
-    """Khối mdb.Job(...) — memory 75%, 6 CPU, THREADS."""
+    """Khối mdb.Job(...) — memory 75%, CPU theo máy, THREADS."""
     desc = description.replace("'", "\\'")
+    cpus = resolve_job_num_cpus()
     return f"""mdb.Job(
     atTime=None,
     contactPrint=OFF,
@@ -59,7 +71,7 @@ def cae_job_constructor_snippet(
     multiprocessingMode=THREADS,
     name={job_var},
     nodalOutputPrecision=SINGLE,
-    numCpus={JOB_NUM_CPUS},
+    numCpus={cpus},
     numDomains={JOB_NUM_DOMAINS},
     numGPUs=0,
     numThreadsPerMpiProcess=1,
@@ -109,6 +121,7 @@ __all__ = [
     "JOB_MEMORY_PERCENT",
     "JOB_MP_MODE",
     "JOB_NUM_CPUS",
+    "resolve_job_num_cpus",
     "JOB_NUM_DOMAINS",
     "cae_configure_riks_steps_snippet",
     "cae_job_constructor_snippet",
