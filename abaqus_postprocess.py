@@ -59,7 +59,7 @@ def build_rf3_postprocess_script(
     node_sets_literal = repr(list(node_sets))
 
     return f"""# -*- coding: mbcs -*-
-# RF3: lay TOAN BO node trong Node Set, moi frame cong tong RF3 -> XY (X=time/frame, Y=Total_RF3)
+# RF3: Node Set BC-1/BC-2 -> moi frame Total_RF3 = sum RF3 tat ca node -> XY (X=time, Y=Total_RF3)
 from odbAccess import openOdb
 from abaqusConstants import NODAL
 import os
@@ -95,7 +95,15 @@ def _discover_targets(odb):
     discovered = []
     seen = set()
 
+    for nset_name in WANTED_LABELS:
+        if nset_name in assembly.nodeSets.keys():
+            discovered.append(('', nset_name, nset_name))
+            seen.add(nset_name)
+            print('FOUND assembly %s' % nset_name)
+
     for inst_name, nset_name in NODE_SETS:
+        if nset_name in seen:
+            continue
         inst_key = _match_instance(assembly, inst_name)
         if inst_key and nset_name in assembly.instances[inst_key].nodeSets.keys():
             discovered.append((inst_key, nset_name, nset_name))
@@ -111,13 +119,10 @@ def _discover_targets(odb):
                 seen.add(nset_name)
                 print('FOUND %s on %s' % (nset_name, inst_name))
                 break
-        if nset_name not in seen and nset_name in assembly.nodeSets.keys():
-            discovered.append(('', nset_name, nset_name))
-            seen.add(nset_name)
-            print('FOUND assembly %s' % nset_name)
 
     if not discovered:
         print('ERROR: BC-1/BC-2 not found')
+        print('Assembly nodeSets: ' + ', '.join(sorted(assembly.nodeSets.keys())))
         print('Instances: ' + ', '.join(sorted(assembly.instances.keys())))
     return discovered
 
@@ -130,6 +135,13 @@ def _get_region(assembly, inst_name, nset_name):
     if nset_name in assembly.nodeSets.keys():
         return assembly.nodeSets[nset_name]
     return None
+
+
+def _region_node_count(region):
+    try:
+        return len(region.nodes)
+    except Exception:
+        return 0
 
 
 def _find_step(odb):
@@ -160,54 +172,59 @@ def _find_step(odb):
     return best_name, best
 
 
-def _node_labels_in_set(region):
-    # Toan bo node label trong Node Set
-    return [node.label for node in region.nodes]
-
-
-def _total_rf3_for_frame(rf_field, region, node_labels):
-    # Total_RF3 = RF3_node1 + RF3_node2 + ... + RF3_nodeN
-    # Uu tien UNIQUE_NODAL; fallback NODAL: trung binh theo node roi cong
-    label_set = set(node_labels)
+def _sum_rf3_region_frame(rf_field, region, debug=False):
+    # Total_RF3 = RF3_node1 + RF3_node2 + ... + RF3_nodeN (qua getSubset region)
     for pos in RF_POSITIONS:
         try:
             subset = rf_field.getSubset(region=region, position=pos)
-            node_rf3 = {{}}
-            for value in subset.values:
-                label = value.nodeLabel
-                if label not in label_set:
-                    continue
+            values = subset.values
+            if not values:
+                if debug:
+                    print('DEBUG getSubset pos=%s: 0 values' % pos)
+                continue
+            by_node = {{}}
+            for value in values:
+                key = value.nodeLabel
                 rf3 = value.data[2]
                 if pos == NODAL:
-                    if label not in node_rf3:
-                        node_rf3[label] = [0.0, 0]
-                    node_rf3[label][0] += rf3
-                    node_rf3[label][1] += 1
+                    if key not in by_node:
+                        by_node[key] = [0.0, 0]
+                    by_node[key][0] += rf3
+                    by_node[key][1] += 1
                 else:
-                    node_rf3[label] = [rf3, 1]
-            if not node_rf3:
-                continue
-            total = sum(acc[0] / acc[1] for acc in node_rf3.values())
-            return total, pos, len(node_rf3)
-        except Exception:
-            pass
+                    by_node[key] = [rf3, 1]
+            total = 0.0
+            for acc in by_node.values():
+                total += acc[0] / acc[1]
+            if debug:
+                print('DEBUG getSubset pos=%s: %d values, %d nodes, total=%g' % (
+                    pos, len(values), len(by_node), total))
+            return total, pos, len(by_node)
+        except Exception as exc:
+            if debug:
+                print('DEBUG getSubset pos=%s failed: %s' % (pos, exc))
     try:
         subset = rf_field.getSubset(region=region)
-        node_rf3 = {{}}
-        for value in subset.values:
-            label = value.nodeLabel
-            if label not in label_set:
-                continue
-            rf3 = value.data[2]
-            if label not in node_rf3:
-                node_rf3[label] = [0.0, 0]
-            node_rf3[label][0] += rf3
-            node_rf3[label][1] += 1
-        if node_rf3:
-            total = sum(acc[0] / acc[1] for acc in node_rf3.values())
-            return total, 'default', len(node_rf3)
-    except Exception:
-        pass
+        values = subset.values
+        if values:
+            by_node = {{}}
+            for value in values:
+                key = value.nodeLabel
+                rf3 = value.data[2]
+                if key not in by_node:
+                    by_node[key] = [0.0, 0]
+                by_node[key][0] += rf3
+                by_node[key][1] += 1
+            total = 0.0
+            for acc in by_node.values():
+                total += acc[0] / acc[1]
+            if debug:
+                print('DEBUG getSubset default: %d values, %d nodes' % (
+                    len(values), len(by_node)))
+            return total, 'default', len(by_node)
+    except Exception as exc:
+        if debug:
+            print('DEBUG getSubset default failed: %s' % exc)
     return None, None, 0
 
 
@@ -218,12 +235,9 @@ def _extract_rf3_xy(odb, inst_name, nset_name):
         print('FAIL region %s %s' % (inst_name, nset_name))
         return None
 
-    node_labels = _node_labels_in_set(region)
-    if not node_labels:
-        print('FAIL empty node set %s' % nset_name)
-        return None
-    print('NSET %s: %d nodes (labels %d..%d)' % (
-        nset_name, len(node_labels), min(node_labels), max(node_labels)))
+    n_nodes = _region_node_count(region)
+    print('NSET %s: %d nodes in set (region=%s)' % (
+        nset_name, n_nodes, 'assembly' if not inst_name else inst_name))
 
     step_name, step = _find_step(odb)
     if step is None:
@@ -233,22 +247,24 @@ def _extract_rf3_xy(odb, inst_name, nset_name):
 
     points = []
     last_pos = '?'
-    for frame in step.frames:
+    n_matched = 0
+    for frame_idx, frame in enumerate(step.frames):
         x_time = frame.frameValue
         if 'RF' not in frame.fieldOutputs.keys():
             continue
-        total_rf3, pos, n_matched = _total_rf3_for_frame(
-            frame.fieldOutputs['RF'], region, node_labels)
+        debug = (frame_idx == 0)
+        total_rf3, pos, n_matched = _sum_rf3_region_frame(
+            frame.fieldOutputs['RF'], region, debug=debug)
         if total_rf3 is None:
             continue
         last_pos = pos
         points.append((x_time, total_rf3))
 
     if not points:
-        print('FAIL no RF3 data for %s' % nset_name)
+        print('FAIL no RF3 data for %s (check RF field output in ODB)' % nset_name)
         return None
-    print('OK %s: %d XY points, %d nodes summed/frame (pos=%s)' % (
-        nset_name, len(points), len(node_labels), last_pos))
+    print('OK %s: %d XY points, ~%d nodes/frame (pos=%s)' % (
+        nset_name, len(points), n_matched, last_pos))
     return points
 
 
