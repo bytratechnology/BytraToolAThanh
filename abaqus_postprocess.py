@@ -42,6 +42,10 @@ def postprocess_script_path(work_dir: Path) -> Path:
     return work_dir.resolve() / "abaqus_postprocess_rf3.py"
 
 
+def postprocess_log_path(work_dir: Path) -> Path:
+    return work_dir.resolve() / "abaqus_postprocess.log"
+
+
 def build_rf3_postprocess_script(
     *,
     work_dir: Path,
@@ -64,6 +68,40 @@ WORK_DIR = r'{work}'
 ODB_PATH = r'{odb}'
 JOB_NAME = '{job_name}'
 NODE_SETS = {node_sets_literal}
+
+
+def _discover_node_sets(odb):
+    # Tim (instance, nset) BC-1/BC-2 trong ODB
+    assembly = odb.rootAssembly
+    discovered = []
+    seen_labels = set()
+
+    for inst_name, nset_name in NODE_SETS:
+        inst = assembly.instances.get(inst_name)
+        if inst is not None and nset_name in inst.nodeSets.keys():
+            discovered.append((inst_name, nset_name, nset_name))
+            seen_labels.add(nset_name)
+            print('FOUND configured %s on %s' % (nset_name, inst_name))
+
+    for nset_name in ('BC-1', 'BC-2'):
+        if nset_name in seen_labels:
+            continue
+        for inst_name in sorted(assembly.instances.keys()):
+            inst = assembly.instances[inst_name]
+            if nset_name in inst.nodeSets.keys():
+                discovered.append((inst_name, nset_name, nset_name))
+                seen_labels.add(nset_name)
+                print('FOUND %s on %s' % (nset_name, inst_name))
+                break
+
+    if not discovered:
+        print('WARN: BC-1/BC-2 not found - instances: ' + ', '.join(sorted(assembly.instances.keys())))
+        for inst_name in sorted(assembly.instances.keys()):
+            keys = sorted(assembly.instances[inst_name].nodeSets.keys())
+            if keys:
+                print('  %s nodeSets: %s' % (inst_name, ', '.join(keys[:20])))
+        discovered = [(a, b, b) for a, b in NODE_SETS]
+    return discovered
 
 
 def _report_path(label):
@@ -130,12 +168,17 @@ session.viewports['Viewport: 1'].setValues(displayedObject=odb)
 
 written = []
 xydata_written = []
-for inst, nset, label in [(a, b, b) for a, b in NODE_SETS]:
+for inst, nset, label in _discover_node_sets(odb):
     result = _extract_and_sum(odb, inst, nset, label)
     if result:
         rpt_path, xy_path = result
         written.append(rpt_path)
         xydata_written.append(xy_path)
+
+if not written and not xydata_written:
+    print('ERROR: No RF3 output files created')
+    import sys
+    sys.exit(1)
 
 summary_path = os.path.join(WORK_DIR, JOB_NAME + '_RF3_SUMMARY.txt')
 with open(summary_path, 'w') as handle:
@@ -151,15 +194,24 @@ print('DONE: RF3 post-process -> ' + summary_path)
 """
 
 
-def _run_viewer_script(cmd: str, script_path: Path, work_dir: Path, timeout: int) -> subprocess.CompletedProcess:
+def _run_viewer_script(cmd: str, script_path: Path, work_dir: Path, timeout: int) -> tuple[subprocess.CompletedProcess, str]:
     argv = build_abaqus_subprocess_args(cmd, ["viewer", f"noGUI={script_path.name}"])
-    return subprocess.run(
+    result = subprocess.run(
         argv,
         cwd=str(work_dir),
         capture_output=True,
         text=True,
         timeout=timeout,
     )
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    log = "\n".join(part for part in (stdout, stderr) if part)
+    log_path = postprocess_log_path(work_dir)
+    try:
+        log_path.write_text(log + ("\n" if log else ""), encoding="utf-8")
+    except OSError:
+        pass
+    return result, log
 
 
 def run_odb_rf3_postprocess(
@@ -190,10 +242,7 @@ def run_odb_rf3_postprocess(
         on_progress("Bước 3: Post-process ODB — RF3 Unique Nodal, node set BC → sum…")
 
     cmd = resolve_abaqus_command(abaqus_cmd)
-    result = _run_viewer_script(cmd, script_path, work_dir, POSTPROCESS_TIMEOUT)
-    stdout = (result.stdout or "").strip()
-    stderr = (result.stderr or "").strip()
-    log = "\n".join(part for part in (stdout, stderr) if part)
+    result, log = _run_viewer_script(cmd, script_path, work_dir, POSTPROCESS_TIMEOUT)
 
     report_paths = [
         path
@@ -207,10 +256,17 @@ def run_odb_rf3_postprocess(
     ]
     summary = rf3_summary_path(work_dir, job_name)
 
-    if result.returncode != 0 and not report_paths and not xydata_output_paths:
+    if not report_paths and not xydata_output_paths:
+        log_path = postprocess_log_path(work_dir)
         raise RuntimeError(
-            f"Post-process ODB thất bại (exit {result.returncode}).\n{log}".strip()
+            f"Post-process ODB khong tao file RF3/XY (exit {result.returncode}).\n"
+            f"Xem log: {log_path}\n\n{log}".strip()
         )
+
+    if result.returncode != 0:
+        log_path = postprocess_log_path(work_dir)
+        if on_progress:
+            on_progress(f"Bước 3: Canh bao viewer exit {result.returncode} — da co output, xem {log_path.name}")
 
     if on_progress:
         for path in report_paths:
