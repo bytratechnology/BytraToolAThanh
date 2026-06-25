@@ -72,6 +72,14 @@ NODE_SETS = {node_sets_literal}
 WANTED_LABELS = ('BC-1', 'BC-2')
 
 
+def _field_positions():
+    positions = [('NODAL', NODAL)]
+    unique = globals().get('UNIQUE_NODAL')
+    if unique is not None:
+        positions.insert(0, ('UNIQUE_NODAL', unique))
+    return positions
+
+
 def _match_instance(assembly, hint):
     names = list(assembly.instances.keys())
     if hint in names:
@@ -158,13 +166,16 @@ def _sum_xy_list(xy_list):
         return None
     if len(xy_list) == 1:
         return xy_list[0]
-    try:
-        return session.XYDataSum(xyData=tuple(xy_list))
-    except Exception:
-        total = xy_list[0]
-        for item in xy_list[1:]:
-            total = total + item
-        return total
+    sum_fn = getattr(session, 'XYDataSum', None)
+    if sum_fn is not None:
+        try:
+            return sum_fn(xyData=tuple(xy_list))
+        except Exception:
+            pass
+    total = xy_list[0]
+    for item in xy_list[1:]:
+        total = total + item
+    return total
 
 
 def _pull_xy_keys(keys_before):
@@ -173,7 +184,7 @@ def _pull_xy_keys(keys_before):
 
 def _try_field_node_sets(odb, inst_name, nset_name):
     errors = []
-    for pos_name, pos in (('UNIQUE_NODAL', UNIQUE_NODAL), ('NODAL', NODAL)):
+    for pos_name, pos in _field_positions():
         keys_before = set(session.xyDataObjects.keys())
         try:
             session.xyDataListFromField(
@@ -204,7 +215,7 @@ def _try_field_node_labels(odb, inst_name, nset_name):
     if not labels:
         return None, ['empty node set']
     errors = []
-    for pos_name, pos in (('UNIQUE_NODAL', UNIQUE_NODAL), ('NODAL', NODAL)):
+    for pos_name, pos in _field_positions():
         keys_before = set(session.xyDataObjects.keys())
         try:
             session.xyDataListFromField(
@@ -228,7 +239,7 @@ def _try_field_assembly_nset(odb, nset_name):
     if nset_name not in assembly.nodeSets.keys():
         return None, ['no assembly nset']
     errors = []
-    for pos_name, pos in (('UNIQUE_NODAL', UNIQUE_NODAL), ('NODAL', NODAL)):
+    for pos_name, pos in _field_positions():
         keys_before = set(session.xyDataObjects.keys())
         try:
             session.xyDataListFromField(
