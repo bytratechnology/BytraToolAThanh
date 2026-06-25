@@ -20,8 +20,10 @@ from abaqus_job_settings import (
     cae_configure_riks_steps_snippet,
     cae_job_constructor_snippet,
     cli_job_resource_args,
+    parse_abaqus_available_cpus,
     patch_inp_riks_no_max_lpf,
     resolve_job_num_cpus,
+    set_job_cpu_override,
 )
 from abaqus_postprocess import OdbPostprocessResult, run_odb_rf3_postprocess
 from file_io import write_text
@@ -717,26 +719,42 @@ print('DONE: Job COMPLETED -> ' + job_name + '.odb')
 """
 
 
-def _run_cli_datacheck(cmd: str, job_name: str, inp_path: Path, work_dir: Path, on_progress):
+def _run_cli_datacheck(
+    cmd: str,
+    job_name: str,
+    inp_path: Path,
+    work_dir: Path,
+    on_progress,
+    *,
+    cpus: int | None = None,
+):
     _notify(on_progress, f"Bước 2: CHECK datacheck — job={job_name}")
     args = [
         f"job={job_name}",
         f"input={_inp_cli_arg(inp_path)}",
         "datacheck=continue",
-        *cli_job_resource_args(),
+        *cli_job_resource_args(cpus),
     ]
     _notify(on_progress, f"Bước 2: Lệnh: {cmd} {' '.join(args)}")
     result = run_abaqus_subprocess(cmd, args, cwd=work_dir, timeout=DATACHECK_TIMEOUT)
     _raise_if_failed(result, work_dir, job_name, "Datacheck")
 
 
-def _run_cli_submit(cmd: str, job_name: str, inp_path: Path, work_dir: Path, on_progress) -> subprocess.Popen:
+def _run_cli_submit(
+    cmd: str,
+    job_name: str,
+    inp_path: Path,
+    work_dir: Path,
+    on_progress,
+    *,
+    cpus: int | None = None,
+) -> subprocess.Popen:
     _notify(on_progress, f"Bước 2: SUBMIT phân tích — job={job_name}")
     log_file = _submit_log_path(work_dir)
     args = [
         f"job={job_name}",
         f"input={_inp_cli_arg(inp_path)}",
-        *cli_job_resource_args(),
+        *cli_job_resource_args(cpus),
         "ask=off",
         "background",
     ]
@@ -744,6 +762,53 @@ def _run_cli_submit(cmd: str, job_name: str, inp_path: Path, work_dir: Path, on_
     _notify(on_progress, f"Bước 2: Poll thư mục → {work_dir.resolve()}")
     _notify(on_progress, "Bước 2: Đã submit — tự kiểm tra .sta/.odb, xong sớm thì lấy ngay…")
     return start_abaqus_subprocess(cmd, args, cwd=work_dir, log_file=log_file)
+
+
+def _maybe_lower_cpus_from_error(err_text: str, current_cpus: int, on_progress) -> bool:
+    limit = parse_abaqus_available_cpus(err_text)
+    if limit is None or limit >= current_cpus:
+        return False
+    set_job_cpu_override(limit)
+    _notify(
+        on_progress,
+        f"Bước 2: Abaqus chỉ cho {limit} CPU — giảm từ {current_cpus}, thử lại…",
+    )
+    return True
+
+
+def _run_cli_analysis_with_cpu_retries(
+    cmd: str,
+    job_name: str,
+    inp_path: Path,
+    work_dir: Path,
+    on_progress,
+) -> str:
+    """Datacheck + submit + chờ — tự giảm cpus nếu Abaqus báo vượt giới hạn."""
+    set_job_cpu_override(None)
+    last_error: RuntimeError | None = None
+
+    for attempt in range(3):
+        cpus = resolve_job_num_cpus()
+        try:
+            _run_cli_datacheck(
+                cmd, job_name, inp_path, work_dir, on_progress, cpus=cpus
+            )
+            analysis_proc = _run_cli_submit(
+                cmd, job_name, inp_path, work_dir, on_progress, cpus=cpus
+            )
+            return _wait_for_completion(
+                work_dir, job_name, on_progress, process=analysis_proc
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            err_text = f"{exc}\n{_read_submit_log_tail(work_dir)}"
+            if attempt < 2 and _maybe_lower_cpus_from_error(err_text, cpus, on_progress):
+                continue
+            raise
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Phân tích Abaqus thất bại sau khi giảm CPU")
 
 
 def _run_cae_script(
@@ -917,8 +982,9 @@ def run_abaqus_analysis(
 
     analysis_proc: subprocess.Popen | None = None
     try:
-        _run_cli_datacheck(cmd, job_name, inp_path, work_dir, on_progress)
-        analysis_proc = _run_cli_submit(cmd, job_name, inp_path, work_dir, on_progress)
+        job_name = _run_cli_analysis_with_cpu_retries(
+            cmd, job_name, inp_path, work_dir, on_progress
+        )
     except RuntimeError as cli_error:
         _notify(on_progress, f"Bước 2: CLI lỗi, thử script CAE — {cli_error}")
         script_path = (script_output or work_dir / "abaqus_run_imperfection.py").resolve()
@@ -935,8 +1001,7 @@ def run_abaqus_analysis(
         )
         _notify(on_progress, f"Bước 2: Đã ghi script → {script_path.name}")
         analysis_proc = _run_cae_script(cmd, script_path, work_dir, job_name, on_progress)
-
-    job_name = _wait_for_completion(work_dir, job_name, on_progress, process=analysis_proc)
+        job_name = _wait_for_completion(work_dir, job_name, on_progress, process=analysis_proc)
 
     odb = find_odb_path(work_dir, job_name)
     if odb is None or not _verify_build_finished(work_dir, job_name, odb):
