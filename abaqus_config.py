@@ -231,13 +231,19 @@ def start_abaqus_subprocess(
     args: list[str],
     *,
     cwd: Path | str,
+    log_file: Path | str | None = None,
 ) -> subprocess.Popen:
-    """Khởi chạy Abaqus nền — dùng kèm poll .sta/.odb để biết xong sớm."""
+    """Khởi chạy Abaqus nền — stdout/stderr ghi file (tránh kẹt PIPE trên Windows)."""
     argv = build_abaqus_subprocess_args(command, args)
+    stdout_target = subprocess.DEVNULL
+    if log_file is not None:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_target = open(log_path, "a", encoding="utf-8", errors="replace")
     return subprocess.Popen(
         argv,
         cwd=str(cwd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_target,
+        stderr=subprocess.STDOUT,
         text=True,
     )

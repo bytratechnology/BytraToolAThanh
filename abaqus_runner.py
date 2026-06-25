@@ -32,6 +32,7 @@ POLL_INTERVAL_SECONDS = 2
 ODB_STABLE_POLLS = 5  # ~10s dung lượng .odb không đổi
 FINAL_VERIFY_DELAY_SECONDS = 2  # kiểm tra lại lần cuối trước khi báo xong
 WAIT_STATUS_LOG_SECONDS = 6  # in trạng thái chi tiết khi chờ solver
+SUBMIT_GRACE_SECONDS = 15  # chờ .sta xuất hiện sau submit (background thoát ngay)
 ODB_OUTPUT_SUFFIX = "-TL"  # file .odb deliverable: {job}-TL.odb
 
 
@@ -112,6 +113,45 @@ def derive_model_name(inp_path: Path, job_name: str) -> str:
     if model:
         return sanitize_job_name(model, max_len=64)
     return sanitize_job_name(job_name, max_len=64)
+
+
+def _inp_cli_arg(inp_path: Path) -> str:
+    """Đường dẫn .inp tuyệt đối — tránh lệch cwd trên Windows."""
+    return str(inp_path.resolve())
+
+
+def discover_job_name(work_dir: Path, hint: str) -> str:
+    """Tìm tên job thực tế từ .sta/.lck/.odb trong thư mục (Abaqus đôi khi khác hint)."""
+    work_dir = work_dir.resolve()
+    hint = sanitize_job_name(hint)
+
+    if (work_dir / f"{hint}.sta").is_file():
+        return hint
+
+    candidates: list[Path] = []
+    for pattern in ("*.sta", "*.lck", "*.odb"):
+        candidates.extend(work_dir.glob(pattern))
+
+    if not candidates:
+        return hint
+
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    return newest.stem
+
+
+def _submit_log_path(work_dir: Path) -> Path:
+    return work_dir.resolve() / "abaqus_submit.log"
+
+
+def _read_submit_log_tail(work_dir: Path, lines: int = 30) -> str:
+    path = _submit_log_path(work_dir)
+    if not path.is_file():
+        return ""
+    try:
+        tail = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-lines:]
+        return "\n".join(tail).strip()
+    except OSError:
+        return ""
 
 
 def find_imperfection_inp(output_dir: Path, inp_source: Path) -> Path | None:
@@ -515,9 +555,48 @@ def _drain_subprocess(process: subprocess.Popen | None, *, grace_seconds: float 
         process.wait(timeout=5)
 
 
+def _job_has_solver_artifacts(work_dir: Path, job_name: str) -> bool:
+    work_dir = work_dir.resolve()
+    active = discover_job_name(work_dir, job_name)
+    if get_sta_status(work_dir, active) is not None:
+        return True
+    if _job_lock_active(work_dir, active):
+        return True
+    if find_odb_path(work_dir, active) is not None:
+        return True
+    return bool(list(work_dir.glob("*.sta")) or list(work_dir.glob("*.lck")))
+
+
 def _raise_if_process_failed(process: subprocess.Popen | None, work_dir: Path, job_name: str, step_label: str):
-    """Không báo lỗi theo exit code — chỉ tin .sta FAILED / .lck / .odb ổn định."""
-    return
+    """Báo lỗi nếu tiến trình submit thoát mà không có dấu hiệu solver (.sta/.lck/.odb)."""
+    if process is None:
+        return
+    rc = process.poll()
+    if rc is None:
+        return
+    if _job_has_solver_artifacts(work_dir, job_name):
+        return
+
+    active_job = discover_job_name(work_dir, job_name)
+    err_parts: list[str] = []
+    if rc != 0:
+        err_parts.append(f"Exit code: {rc}")
+    submit_tail = _read_submit_log_tail(work_dir)
+    if submit_tail:
+        err_parts.append(f"--- abaqus_submit.log ---\n{submit_tail}")
+    log_tail = _read_job_log_tail(work_dir, active_job)
+    if log_tail:
+        err_parts.append(f"--- job log ---\n{log_tail}")
+
+    listing = sorted(p.name for p in work_dir.iterdir() if p.is_file())[:25]
+    files_hint = ", ".join(listing) if listing else "(không có file)"
+    detail = "\n\n".join(err_parts) if err_parts else "Không có log Abaqus."
+    raise RuntimeError(
+        f"{step_label} thoát sớm — chưa thấy .sta/.odb.\n"
+        f"Thư mục poll: {work_dir.resolve()}\n"
+        f"Job (hint): {job_name}\n"
+        f"File trong thư mục: {files_hint}\n\n{detail}"
+    )
 
 
 def _raise_if_failed(result, work_dir: Path, job_name: str, step_label: str):
@@ -637,10 +716,10 @@ print('DONE: Job COMPLETED -> ' + job_name + '.odb')
 
 
 def _run_cli_datacheck(cmd: str, job_name: str, inp_path: Path, work_dir: Path, on_progress):
-    _notify(on_progress, f"Bước 2: CHECK datacheck — job={job_name}, input={inp_path.name}")
+    _notify(on_progress, f"Bước 2: CHECK datacheck — job={job_name}")
     args = [
         f"job={job_name}",
-        f"input={inp_path.name}",
+        f"input={_inp_cli_arg(inp_path)}",
         "datacheck=continue",
         *cli_job_resource_args(),
     ]
@@ -651,15 +730,18 @@ def _run_cli_datacheck(cmd: str, job_name: str, inp_path: Path, work_dir: Path, 
 
 def _run_cli_submit(cmd: str, job_name: str, inp_path: Path, work_dir: Path, on_progress) -> subprocess.Popen:
     _notify(on_progress, f"Bước 2: SUBMIT phân tích — job={job_name}")
+    log_file = _submit_log_path(work_dir)
     args = [
         f"job={job_name}",
-        f"input={inp_path.name}",
+        f"input={_inp_cli_arg(inp_path)}",
         *cli_job_resource_args(),
         "ask=off",
+        "background",
     ]
     _notify(on_progress, f"Bước 2: Lệnh: {cmd} {' '.join(args)}")
+    _notify(on_progress, f"Bước 2: Poll thư mục → {work_dir.resolve()}")
     _notify(on_progress, "Bước 2: Đã submit — tự kiểm tra .sta/.odb, xong sớm thì lấy ngay…")
-    return start_abaqus_subprocess(cmd, args, cwd=work_dir)
+    return start_abaqus_subprocess(cmd, args, cwd=work_dir, log_file=log_file)
 
 
 def _run_cae_script(
@@ -674,6 +756,7 @@ def _run_cae_script(
         cmd,
         ["cae", f"noGUI={script_path}"],
         cwd=work_dir,
+        log_file=_submit_log_path(work_dir),
     )
 
 
@@ -683,25 +766,41 @@ def _wait_for_completion(
     on_progress,
     process: subprocess.Popen | None = None,
 ):
-    _notify(on_progress, f"Bước 2: Theo dõi tiến trình — poll {job_name}.sta / .odb mỗi {POLL_INTERVAL_SECONDS}s…")
+    work_dir = work_dir.resolve()
+    job_name = sanitize_job_name(job_name)
+    active_job = job_name
+    _notify(
+        on_progress,
+        f"Bước 2: Theo dõi tiến trình — poll {active_job}.sta / .odb mỗi {POLL_INTERVAL_SECONDS}s…",
+    )
     deadline = time.time() + ANALYSIS_MAX_WAIT_SECONDS
+    submit_grace_end = time.time() + SUBMIT_GRACE_SECONDS
     last_log = 0.0
     last_status = ""
     last_odb_size: int | None = None
     odb_stable_polls = 0
+    reported_discovered = False
+    warned_no_sta = False
 
     while time.time() < deadline:
-        sta_status = get_sta_status(work_dir, job_name)
+        discovered = discover_job_name(work_dir, job_name)
+        if discovered != active_job:
+            active_job = discovered
+            if not reported_discovered:
+                _notify(on_progress, f"Bước 2: Phát hiện job Abaqus → {active_job}")
+                reported_discovered = True
+
+        sta_status = get_sta_status(work_dir, active_job)
         if sta_status == "FAILED":
             _drain_subprocess(process)
-            log_tail = _read_job_log_tail(work_dir, job_name)
+            log_tail = _read_job_log_tail(work_dir, active_job)
             raise RuntimeError(f"Job thất bại (ERROR/ABORT trong .sta).\n{log_tail}".strip())
 
-        odb = find_odb_path(work_dir, job_name)
+        odb = find_odb_path(work_dir, active_job)
 
         ready, last_odb_size, odb_stable_polls, pending_reason = _is_build_fully_finished(
             work_dir,
-            job_name,
+            active_job,
             odb,
             last_odb_size=last_odb_size,
             odb_stable_polls=odb_stable_polls,
@@ -710,13 +809,13 @@ def _wait_for_completion(
 
         extra_reason = ""
         if ready and odb is not None:
-            if _verify_build_finished(work_dir, job_name, odb):
+            if _verify_build_finished(work_dir, active_job, odb):
                 _drain_subprocess(process)
                 _notify(
                     on_progress,
                     f"Bước 2: Build xong → {odb.name} ({_format_size(odb)})",
                 )
-                return
+                return active_job
 
             odb_stable_polls = 0
             last_odb_size = None
@@ -726,7 +825,7 @@ def _wait_for_completion(
 
         now = time.time()
         status = _build_wait_status_message(
-            work_dir, job_name, odb, pending_reason=extra_reason
+            work_dir, active_job, odb, pending_reason=extra_reason
         )
         if status and (
             status != last_status
@@ -736,17 +835,31 @@ def _wait_for_completion(
             last_status = status
             last_log = now
 
-        if process is not None and process.poll() is not None:
-            _raise_if_process_failed(process, work_dir, job_name, "Phân tích Abaqus")
+        if (
+            not warned_no_sta
+            and now >= submit_grace_end
+            and not _job_has_solver_artifacts(work_dir, active_job)
+        ):
+            listing = sorted(p.name for p in work_dir.iterdir() if p.is_file())[:20]
+            _notify(
+                on_progress,
+                f"Bước 2: Sau {SUBMIT_GRACE_SECONDS}s vẫn chưa có .sta — kiểm tra {work_dir}\n"
+                f"    File: {', '.join(listing) if listing else '(trống)'}",
+            )
+            warned_no_sta = True
+
+        if process is not None and process.poll() is not None and now >= submit_grace_end:
+            _raise_if_process_failed(process, work_dir, active_job, "Phân tích Abaqus")
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
     _drain_subprocess(process)
-    if not _analysis_completed(work_dir, job_name):
-        log_tail = _read_job_log_tail(work_dir, job_name)
-        artifacts = _list_job_artifacts(work_dir, job_name)
-        sta = get_sta_status(work_dir, job_name)
-        odb = find_odb_path(work_dir, job_name)
+    active_job = discover_job_name(work_dir, job_name)
+    if not _analysis_completed(work_dir, active_job):
+        log_tail = _read_job_log_tail(work_dir, active_job)
+        artifacts = _list_job_artifacts(work_dir, active_job)
+        sta = get_sta_status(work_dir, active_job)
+        odb = find_odb_path(work_dir, active_job)
         extra = ""
         if sta == "COMPLETED" and odb is not None:
             extra = f"\n.sta đã COMPLETED nhưng {odb.name} ({_format_size(odb)}) vẫn đang tăng dung lượng."
@@ -777,7 +890,13 @@ def run_abaqus_analysis(
     if validation_errors:
         raise ValueError("File IMPERFECTION không hợp lệ:\n" + "\n".join(validation_errors))
 
-    work_dir = (work_dir or inp_path.parent).resolve()
+    inp_work_dir = inp_path.parent.resolve()
+    if work_dir is not None and Path(work_dir).resolve() != inp_work_dir:
+        _notify(
+            on_progress,
+            f"Bước 2: Poll .sta/.odb tại thư mục chứa .inp → {inp_work_dir}",
+        )
+    work_dir = inp_work_dir
     job_name = sanitize_job_name(job_name or derive_job_name(inp_path))
     model_name = derive_model_name(inp_path, job_name)
     cmd = resolve_abaqus_command(abaqus_cmd)
@@ -814,7 +933,7 @@ def run_abaqus_analysis(
         _notify(on_progress, f"Bước 2: Đã ghi script → {script_path.name}")
         analysis_proc = _run_cae_script(cmd, script_path, work_dir, job_name, on_progress)
 
-    _wait_for_completion(work_dir, job_name, on_progress, process=analysis_proc)
+    job_name = _wait_for_completion(work_dir, job_name, on_progress, process=analysis_proc)
 
     odb = find_odb_path(work_dir, job_name)
     if odb is None or not _verify_build_finished(work_dir, job_name, odb):
