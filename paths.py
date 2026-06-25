@@ -1,7 +1,7 @@
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from file_io import remove_tree
 from app_runtime import application_dir, bundle_dir
 
 
@@ -108,9 +108,17 @@ class ProjectPaths:
     def ensure_work_dir(self):
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
-    def cleanup_work_dir(self):
-        if self.work_dir.is_dir():
-            shutil.rmtree(self.work_dir)
+    def cleanup_work_dir(self, *, strict: bool = False) -> bool:
+        """Xóa thư mục tạm _work. Trả False nếu file vẫn bị khóa (không fail pipeline)."""
+        if not self.work_dir.is_dir():
+            return True
+        try:
+            remove_tree(self.work_dir)
+            return True
+        except OSError:
+            if strict:
+                raise
+            return False
 
 
 DEFAULT_PATHS = ProjectPaths.defaults()

@@ -1,6 +1,8 @@
 import os
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 from incorporation import run_incorporation_python
@@ -93,8 +95,16 @@ def _write_inp(paths: ProjectPaths, on_progress=None) -> str:
         inp_output=paths.inp_result,
     )
     _notify(on_progress, f"Bước 2: {msg}")
-    paths.cleanup_work_dir()
-    _notify(on_progress, "Bước 2: Đã xóa file tạm, chỉ giữ file .inp kết quả.")
+    if sys.platform == "win32":
+        time.sleep(0.75)
+    if paths.cleanup_work_dir():
+        _notify(on_progress, "Bước 2: Đã xóa file tạm, chỉ giữ file .inp kết quả.")
+    else:
+        _notify(
+            on_progress,
+            f"Bước 2: Cảnh báo — chưa xóa được {paths.work_dir.name} "
+            "(file đang bị khóa bởi MATLAB/Excel; có thể xóa thủ công sau).",
+        )
     return msg
 
 
