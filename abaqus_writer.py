@@ -7,6 +7,7 @@ from pathlib import Path
 
 from file_io import write_text
 from inputs import ProcessInputs
+from abaqus_job_settings import JOB_MEMORY_PERCENT, JOB_NUM_CPUS, JOB_NUM_DOMAINS
 
 ORIGINAL_LENGTH = 2420
 DEFAULT_LT_FACTOR = 0.1
@@ -32,7 +33,7 @@ class AbaqusCaeSettings:
     model_name: str = ""
     model_e1: str = ""
     model_e2: str = ""
-    num_cpus: int = 2
+    num_cpus: int = JOB_NUM_CPUS
 
 
 def _python_path(path: Path) -> str:
@@ -88,6 +89,8 @@ def build_compression_stub_script(
     shell = settings.shell_feature
     partition = settings.partition_feature
     cpus = settings.num_cpus
+    mem = JOB_MEMORY_PERCENT
+    domains = JOB_NUM_DOMAINS
 
     return f"""# -*- coding: mbcs -*-
 # Generated — theo Original_Compression_StubColumn_Long.py
@@ -197,9 +200,9 @@ mdb.models[Model_name].rootAssembly.regenerate()
 mdb.Job(
     atTime=None, contactPrint=OFF, description='', echoPrint=OFF,
     explicitPrecision=SINGLE, getMemoryFromAnalysis=True, historyPrint=OFF,
-    memory=90, memoryUnits=PERCENTAGE, model=Model_name, modelPrint=OFF,
-    multiprocessingMode=DEFAULT, name=Model_name, nodalOutputPrecision=SINGLE,
-    numCpus={cpus}, numDomains={cpus}, numGPUs=0, numThreadsPerMpiProcess=1,
+    memory={mem}, memoryUnits=PERCENTAGE, model=Model_name, modelPrint=OFF,
+    multiprocessingMode=THREADS, name=Model_name, nodalOutputPrecision=SINGLE,
+    numCpus={cpus}, numDomains={domains}, numGPUs=0, numThreadsPerMpiProcess=1,
     queue=None, resultsFormat=ODB, scratch='', type=ANALYSIS,
     userSubroutine='', waitHours=0, waitMinutes=0,
 )
@@ -216,18 +219,18 @@ mdb.models[Model_E2].rootAssembly.translate(
 mdb.Job(
     atTime=None, contactPrint=OFF, description='', echoPrint=OFF,
     explicitPrecision=SINGLE, getMemoryFromAnalysis=True, historyPrint=OFF,
-    memory=90, memoryUnits=PERCENTAGE, model=Model_E1, modelPrint=OFF,
-    multiprocessingMode=DEFAULT, name=Model_E1, nodalOutputPrecision=SINGLE,
-    numCpus={cpus}, numDomains={cpus}, numGPUs=0, numThreadsPerMpiProcess=1,
+    memory={mem}, memoryUnits=PERCENTAGE, model=Model_E1, modelPrint=OFF,
+    multiprocessingMode=THREADS, name=Model_E1, nodalOutputPrecision=SINGLE,
+    numCpus={cpus}, numDomains={domains}, numGPUs=0, numThreadsPerMpiProcess=1,
     queue=None, resultsFormat=ODB, scratch='', type=ANALYSIS,
     userSubroutine='', waitHours=0, waitMinutes=0,
 )
 mdb.Job(
     atTime=None, contactPrint=OFF, description='', echoPrint=OFF,
     explicitPrecision=SINGLE, getMemoryFromAnalysis=True, historyPrint=OFF,
-    memory=90, memoryUnits=PERCENTAGE, model=Model_E2, modelPrint=OFF,
-    multiprocessingMode=DEFAULT, name=Model_E2, nodalOutputPrecision=SINGLE,
-    numCpus={cpus}, numDomains={cpus}, numGPUs=0, numThreadsPerMpiProcess=1,
+    memory={mem}, memoryUnits=PERCENTAGE, model=Model_E2, modelPrint=OFF,
+    multiprocessingMode=THREADS, name=Model_E2, nodalOutputPrecision=SINGLE,
+    numCpus={cpus}, numDomains={domains}, numGPUs=0, numThreadsPerMpiProcess=1,
     queue=None, resultsFormat=ODB, scratch='', type=ANALYSIS,
     userSubroutine='', waitHours=0, waitMinutes=0,
 )

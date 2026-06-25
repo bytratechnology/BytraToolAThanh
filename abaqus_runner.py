@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -15,11 +15,16 @@ from abaqus_config import (
     run_abaqus_subprocess,
     start_abaqus_subprocess,
 )
+from abaqus_job_settings import (
+    cae_configure_riks_steps_snippet,
+    cae_job_constructor_snippet,
+    cli_job_resource_args,
+    patch_inp_riks_no_max_lpf,
+)
+from abaqus_postprocess import OdbPostprocessResult, run_odb_rf3_postprocess
 from file_io import write_text
 
 IMPFECTION_SUFFIXES = ("_IMPERFECTION", "-IMPERFECTION", "_IMPFECTION", "-IMPFECTION")
-CPUS = 2
-MEMORY = "90%"
 DATACHECK_TIMEOUT = 900
 ANALYSIS_MAX_WAIT_SECONDS = 7200  # giới hạn tối đa — xong sớm thì lấy sớm
 POLL_INTERVAL_SECONDS = 2
@@ -34,15 +39,23 @@ class AbaqusRunResult:
     odb_path: Path
     result_file: Path
     script_path: Path | None = None
+    postprocess: OdbPostprocessResult | None = None
+    rf3_report_paths: list[Path] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [
-            f"Phân tích Abaqus hoàn tất — build xong",
+            "Phân tích Abaqus hoàn tất — build xong",
             f"→ {self.odb_path.name}",
             f"→ {self.result_file.name}",
         ]
+        for report in self.rf3_report_paths:
+            lines.append(f"→ {report.name}")
+        if self.postprocess and self.postprocess.summary_path:
+            lines.append(f"→ {self.postprocess.summary_path.name}")
         if self.script_path:
             lines.append(f"→ {self.script_path.name}")
+        if self.postprocess and self.postprocess.script_path:
+            lines.append(f"→ {self.postprocess.script_path.name}")
         return "\n".join(lines)
 
 
@@ -454,6 +467,7 @@ def build_result_summary(
     *,
     status: str = "COMPLETED",
     odb_path: Path | None = None,
+    rf3_report_paths: list[Path] | None = None,
 ) -> Path:
     """Ghi file tóm tắt kết quả phân tích Abaqus."""
     work_dir = work_dir.resolve()
@@ -473,6 +487,12 @@ def build_result_summary(
         f"Work dir    : {work_dir}",
         "",
     ]
+
+    if rf3_report_paths:
+        lines.append("RF3 reports (sum per node set):")
+        for report in rf3_report_paths:
+            lines.append(f"  - {report.name}")
+        lines.append("")
 
     if sta_tail:
         lines.extend(["--- .sta (cuối file) ---", sta_tail, ""])
@@ -517,34 +537,9 @@ if job_name in mdb.jobs.keys():
 
 print('CHECK: Import model tu file .inp...')
 mdb.ModelFromInputFile(name=model_name, inputFileName=inp_file)
-
-mdb.Job(
-    atTime=None,
-    contactPrint=OFF,
-    description='IMPERFECTION auto submit',
-    echoPrint=OFF,
-    explicitPrecision=SINGLE,
-    getMemoryFromAnalysis=True,
-    historyPrint=OFF,
-    memory=90,
-    memoryUnits=PERCENTAGE,
-    model=model_name,
-    modelPrint=OFF,
-    multiprocessingMode=DEFAULT,
-    name=job_name,
-    nodalOutputPrecision=SINGLE,
-    numCpus={CPUS},
-    numDomains={CPUS},
-    numGPUs=0,
-    numThreadsPerMpiProcess=1,
-    queue=None,
-    resultsFormat=ODB,
-    scratch='',
-    type=ANALYSIS,
-    userSubroutine='',
-    waitHours=0,
-    waitMinutes=0,
-)
+{cae_configure_riks_steps_snippet()}
+{cae_job_constructor_snippet(model_var="model_name", job_var="job_name")}
+print('CONFIGURE job: memory=75%, cpus=6, mp_mode=THREADS')
 
 print('CHECK: writeInput consistencyChecking=ON...')
 mdb.jobs[job_name].writeInput(consistencyChecking=ON)
@@ -566,8 +561,7 @@ def _run_cli_datacheck(cmd: str, job_name: str, inp_path: Path, work_dir: Path, 
         f"job={job_name}",
         f"input={inp_path.name}",
         "datacheck=continue",
-        f"cpus={CPUS}",
-        f"memory={MEMORY}",
+        *cli_job_resource_args(),
     ]
     _notify(on_progress, f"Bước 2: Lệnh: {cmd} {' '.join(args)}")
     result = run_abaqus_subprocess(cmd, args, cwd=work_dir, timeout=DATACHECK_TIMEOUT)
@@ -579,8 +573,7 @@ def _run_cli_submit(cmd: str, job_name: str, inp_path: Path, work_dir: Path, on_
     args = [
         f"job={job_name}",
         f"input={inp_path.name}",
-        f"cpus={CPUS}",
-        f"memory={MEMORY}",
+        *cli_job_resource_args(),
         "ask=off",
     ]
     _notify(on_progress, f"Bước 2: Lệnh: {cmd} {' '.join(args)}")
@@ -719,6 +712,13 @@ def run_abaqus_analysis(
 
     _notify(on_progress, f"Bước 2: Abaqus → {cmd}")
     _notify(on_progress, f"Bước 2: File → {inp_path.name}  |  Job → {job_name}")
+    _notify(
+        on_progress,
+        "Bước 2: Job settings — memory 75%, 6 CPUs, Threads, bỏ max load proportional factor",
+    )
+
+    if patch_inp_riks_no_max_lpf(inp_path):
+        _notify(on_progress, "Bước 2: Đã chỉnh .inp — *Static, riks không giới hạn maxLPF")
 
     analysis_proc: subprocess.Popen | None = None
     try:
@@ -754,12 +754,27 @@ def run_abaqus_analysis(
     odb_tl = publish_odb_output(odb, job_name)
     _notify(on_progress, f"Bước 2: Đã xuất {odb_tl.name}")
 
+    postprocess: OdbPostprocessResult | None = None
+    rf3_report_paths: list[Path] = []
+    try:
+        postprocess = run_odb_rf3_postprocess(
+            odb_tl,
+            work_dir=work_dir,
+            job_name=job_name,
+            abaqus_cmd=abaqus_cmd,
+            on_progress=on_progress,
+        )
+        rf3_report_paths = postprocess.report_paths
+    except Exception as exc:
+        _notify(on_progress, f"Bước 3: Post-process RF3 thất bại — {exc}")
+
     result_file = build_result_summary(
         work_dir,
         job_name,
         inp_path,
         status="COMPLETED",
         odb_path=odb_tl,
+        rf3_report_paths=rf3_report_paths,
     )
     _notify(on_progress, f"Bước 2: Đã ghi file kết quả → {result_file.name}")
 
@@ -768,6 +783,8 @@ def run_abaqus_analysis(
         odb_path=odb_tl,
         result_file=result_file,
         script_path=script_path,
+        postprocess=postprocess,
+        rf3_report_paths=rf3_report_paths,
     )
 
 

@@ -85,6 +85,10 @@ class ProjectPaths:
     def abaqus_odb_output(self, job_name: str) -> Path:
         return self.output_dir / f"{job_name}-TL.odb"
 
+    def abaqus_rf3_report(self, job_name: str, node_set: str) -> Path:
+        safe = node_set.replace("-", "_")
+        return self.output_dir / f"{job_name}_{safe}_RF3_sum.rpt"
+
     def validate_sources(self):
         """Kiểm tra file nguồn tồn tại."""
         missing = []

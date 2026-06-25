@@ -22,6 +22,9 @@ datas = [(str(project_dir / "A_THANH"), "A_THANH")]
 
 hiddenimports = [
     "abaqus_config",
+    "abaqus_job_settings",
+    "abaqus_postprocess",
+    "batch_models",
     "abaqus_runner",
     "abaqus_writer",
     "app_runtime",
