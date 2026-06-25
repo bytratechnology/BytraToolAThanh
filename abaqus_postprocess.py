@@ -9,7 +9,7 @@ from pathlib import Path
 from abaqus_config import build_abaqus_subprocess_args, resolve_abaqus_command
 from file_io import write_abaqus_script, write_text
 
-POSTPROCESS_TIMEOUT = 600
+POSTPROCESS_TIMEOUT = 1200
 DEFAULT_NODE_SETS = (
     ("Plate-1", "BC-1"),
     ("Plate-2", "BC-2"),
@@ -59,11 +59,12 @@ def build_rf3_postprocess_script(
     node_sets_literal = repr(list(node_sets))
 
     return f"""# -*- coding: mbcs -*-
-# Giong CAE: ODB field output RF.RF3, Unique Nodal, Node set BC-1/BC-2, sum tung node -> XY
+# RF.RF3 Unique Nodal, Node set BC-1/BC-2, sum -> XY (giong CAE). Khong dung viewer.
 from odbAccess import openOdb
 from abaqusConstants import NODAL
 import os
 import sys
+import traceback
 
 WORK_DIR = r'{work}'
 ODB_PATH = r'{odb}'
@@ -71,16 +72,30 @@ JOB_NAME = '{job_name}'
 NODE_SETS = {node_sets_literal}
 WANTED_LABELS = ('BC-1', 'BC-2')
 
+RF_POSITIONS = []
 try:
     from abaqusConstants import UNIQUE_NODAL
-    RF_POSITIONS = (UNIQUE_NODAL, NODAL)
-except ImportError:
+    RF_POSITIONS.append(UNIQUE_NODAL)
+except Exception:
     UNIQUE_NODAL = None
-    RF_POSITIONS = (NODAL,)
+RF_POSITIONS.append(NODAL)
+
+
+def _safe_rf3(value):
+    try:
+        data = value.data
+        if data is not None and len(data) >= 3:
+            return float(data[2])
+    except Exception:
+        pass
+    return None
 
 
 def _match_instance(assembly, hint):
-    names = list(assembly.instances.keys())
+    try:
+        names = list(assembly.instances.keys())
+    except Exception:
+        return None
     if hint in names:
         return hint
     hint_u = hint.upper()
@@ -94,46 +109,57 @@ def _discover_targets(odb):
     assembly = odb.rootAssembly
     discovered = []
     seen = set()
-
     for nset_name in WANTED_LABELS:
-        if nset_name in assembly.nodeSets.keys():
-            discovered.append(('', nset_name, nset_name))
-            seen.add(nset_name)
-            print('FOUND assembly %s' % nset_name)
-
+        try:
+            if nset_name in assembly.nodeSets.keys():
+                discovered.append(('', nset_name, nset_name))
+                seen.add(nset_name)
+                print('FOUND assembly %s' % nset_name)
+        except Exception:
+            pass
     for inst_name, nset_name in NODE_SETS:
         if nset_name in seen:
             continue
         inst_key = _match_instance(assembly, inst_name)
-        if inst_key and nset_name in assembly.instances[inst_key].nodeSets.keys():
-            discovered.append((inst_key, nset_name, nset_name))
-            seen.add(nset_name)
-            print('FOUND %s on %s' % (nset_name, inst_key))
-
+        try:
+            if inst_key and nset_name in assembly.instances[inst_key].nodeSets.keys():
+                discovered.append((inst_key, nset_name, nset_name))
+                seen.add(nset_name)
+                print('FOUND %s on %s' % (nset_name, inst_key))
+        except Exception:
+            pass
     for nset_name in WANTED_LABELS:
         if nset_name in seen:
             continue
-        for inst_name in sorted(assembly.instances.keys()):
-            if nset_name in assembly.instances[inst_name].nodeSets.keys():
-                discovered.append((inst_name, nset_name, nset_name))
-                seen.add(nset_name)
-                print('FOUND %s on %s' % (nset_name, inst_name))
-                break
-
+        try:
+            for inst_name in sorted(assembly.instances.keys()):
+                if nset_name in assembly.instances[inst_name].nodeSets.keys():
+                    discovered.append((inst_name, nset_name, nset_name))
+                    seen.add(nset_name)
+                    print('FOUND %s on %s' % (nset_name, inst_name))
+                    break
+        except Exception:
+            pass
     if not discovered:
         print('ERROR: BC-1/BC-2 not found')
-        print('Assembly nodeSets: ' + ', '.join(sorted(assembly.nodeSets.keys())))
-        print('Instances: ' + ', '.join(sorted(assembly.instances.keys())))
+        try:
+            print('Assembly nodeSets: ' + ', '.join(sorted(assembly.nodeSets.keys())))
+            print('Instances: ' + ', '.join(sorted(assembly.instances.keys())))
+        except Exception:
+            pass
     return discovered
 
 
 def _get_region(assembly, inst_name, nset_name):
-    if inst_name:
-        inst_key = _match_instance(assembly, inst_name)
-        if inst_key and nset_name in assembly.instances[inst_key].nodeSets.keys():
-            return assembly.instances[inst_key].nodeSets[nset_name]
-    if nset_name in assembly.nodeSets.keys():
-        return assembly.nodeSets[nset_name]
+    try:
+        if inst_name:
+            inst_key = _match_instance(assembly, inst_name)
+            if inst_key and nset_name in assembly.instances[inst_key].nodeSets.keys():
+                return assembly.instances[inst_key].nodeSets[nset_name]
+        if nset_name in assembly.nodeSets.keys():
+            return assembly.nodeSets[nset_name]
+    except Exception:
+        pass
     return None
 
 
@@ -144,68 +170,39 @@ def _region_node_count(region):
         return 0
 
 
-def _find_step(odb):
-    best = None
-    best_name = ''
-    best_frames = 0
-    for name, step in odb.steps.items():
-        if name == 'Initial':
-            continue
-        nframes = len(step.frames)
-        if nframes <= best_frames:
-            continue
-        has_rf = False
-        for frame in step.frames:
-            if 'RF' in frame.fieldOutputs.keys():
-                has_rf = True
-                break
-        if has_rf and nframes > best_frames:
-            best = step
-            best_name = name
-            best_frames = nframes
-    if best is None:
-        for name, step in odb.steps.items():
-            if len(step.frames) > best_frames:
-                best = step
-                best_name = name
-                best_frames = len(step.frames)
-    return best_name, best
-
-
-def _rf3_from_node(rf_field, node):
-    # RF3 Unique Nodal tai 1 node (nhu CAE: RF:RF3 at part instance ... node N)
-    for pos in RF_POSITIONS:
-        try:
-            subset = rf_field.getSubset(region=node, position=pos)
-            vals = subset.values
-            if vals:
-                s = 0.0
-                for v in vals:
-                    s += v.data[2]
-                return s / len(vals), pos
-        except Exception:
-            pass
+def _node_key(value):
     try:
-        subset = rf_field.getSubset(region=node)
-        vals = subset.values
-        if vals:
-            s = 0.0
-            for v in vals:
-                s += v.data[2]
-            return s / len(vals), 'default'
+        inst = getattr(value, 'instance', None)
+        if inst is not None:
+            return (inst.name, value.nodeLabel)
     except Exception:
         pass
-    return None, None
+    try:
+        return ('', value.nodeLabel)
+    except Exception:
+        return ('', 0)
 
 
-def _node_key(value):
-    inst = getattr(value, 'instance', None)
-    if inst is not None:
-        try:
-            return (inst.name, value.nodeLabel)
-        except Exception:
-            pass
-    return ('', value.nodeLabel)
+def _accumulate_values(values, use_nodal_avg):
+    by_node = {{}}
+    for value in values:
+        rf3 = _safe_rf3(value)
+        if rf3 is None:
+            continue
+        key = _node_key(value)
+        if use_nodal_avg:
+            if key not in by_node:
+                by_node[key] = [0.0, 0]
+            by_node[key][0] += rf3
+            by_node[key][1] += 1
+        else:
+            by_node[key] = [rf3, 1]
+    if not by_node:
+        return None, 0
+    total = 0.0
+    for acc in by_node.values():
+        total += acc[0] / acc[1]
+    return total, len(by_node)
 
 
 def _sum_rf3_bulk(rf_field, region, debug=False):
@@ -214,74 +211,129 @@ def _sum_rf3_bulk(rf_field, region, debug=False):
             subset = rf_field.getSubset(region=region, position=pos)
             values = subset.values
             if not values:
+                if debug:
+                    print('DEBUG bulk pos=%s: 0 values' % pos)
                 continue
-            by_node = {{}}
-            for value in values:
-                key = _node_key(value)
-                rf3 = value.data[2]
-                if pos == NODAL:
-                    if key not in by_node:
-                        by_node[key] = [0.0, 0]
-                    by_node[key][0] += rf3
-                    by_node[key][1] += 1
-                else:
-                    by_node[key] = [rf3, 1]
-            total = 0.0
-            for acc in by_node.values():
-                total += acc[0] / acc[1]
-            if debug:
-                print('DEBUG bulk pos=%s: %d values, %d nodes, total=%g' % (
-                    pos, len(values), len(by_node), total))
-            return total, pos, len(by_node)
+            use_avg = (pos == NODAL)
+            total, n_nodes = _accumulate_values(values, use_avg)
+            if total is not None:
+                if debug:
+                    print('DEBUG bulk pos=%s: %d vals, %d nodes, total=%g' % (
+                        pos, len(values), n_nodes, total))
+                return total, pos, n_nodes
         except Exception as exc:
             if debug:
-                print('DEBUG bulk pos=%s failed: %s' % (pos, exc))
+                print('DEBUG bulk pos=%s: %s' % (pos, exc))
+    try:
+        subset = rf_field.getSubset(region=region)
+        values = subset.values
+        if values:
+            total, n_nodes = _accumulate_values(values, True)
+            if total is not None:
+                if debug:
+                    print('DEBUG bulk default: %d vals, %d nodes, total=%g' % (
+                        len(values), n_nodes, total))
+                return total, 'default', n_nodes
+    except Exception as exc:
+        if debug:
+            print('DEBUG bulk default: %s' % exc)
     return None, None, 0
 
 
+def _rf3_from_node(rf_field, node):
+    for pos in RF_POSITIONS:
+        try:
+            subset = rf_field.getSubset(region=node, position=pos)
+            vals = subset.values
+            if not vals:
+                continue
+            s = 0.0
+            n = 0
+            for v in vals:
+                rf3 = _safe_rf3(v)
+                if rf3 is not None:
+                    s += rf3
+                    n += 1
+            if n > 0:
+                return s / n, pos
+        except Exception:
+            pass
+    try:
+        subset = rf_field.getSubset(region=node)
+        vals = subset.values
+        if vals:
+            s = 0.0
+            n = 0
+            for v in vals:
+                rf3 = _safe_rf3(v)
+                if rf3 is not None:
+                    s += rf3
+                    n += 1
+            if n > 0:
+                return s / n, 'default'
+    except Exception:
+        pass
+    return None, None
+
+
 def _sum_rf3_per_node(rf_field, region, debug=False):
-    # Total_RF3 = RF3_node1 + RF3_node2 + ... + RF3_nodeN (giong Operate on XY sum)
     try:
         arr = region.nodes
         n_total = len(arr)
     except Exception:
         return None, None, 0
-    if n_total == 0:
+    if n_total <= 0:
         return None, None, 0
-
     total = 0.0
     count = 0
     pos_used = '?'
     for i in range(n_total):
-        node = arr[i]
-        rf3, pos = _rf3_from_node(rf_field, node)
-        if rf3 is None:
+        try:
+            node = arr[i]
+            rf3, pos = _rf3_from_node(rf_field, node)
+            if rf3 is None:
+                continue
+            total += rf3
+            count += 1
+            pos_used = pos
+        except Exception:
             continue
-        total += rf3
-        count += 1
-        pos_used = pos
-
     if count > 0:
         if debug:
-            print('DEBUG per-node: %d/%d nodes, total=%g, pos=%s' % (
-                count, n_total, total, pos_used))
+            print('DEBUG per-node: %d/%d nodes, total=%g' % (count, n_total, total))
         return total, pos_used, count
     return None, None, 0
 
 
 def _sum_rf3_region_frame(rf_field, region, debug=False):
-    n_expect = _region_node_count(region)
-    result = _sum_rf3_per_node(rf_field, region, debug=debug)
-    if result[0] is not None:
-        return result
-    if debug:
-        print('DEBUG per-node failed, try bulk getSubset')
     result = _sum_rf3_bulk(rf_field, region, debug=debug)
     if result[0] is not None:
         return result
     if debug:
-        print('DEBUG all methods failed (expected ~%d nodes)' % n_expect)
-    return None, None, 0
+        print('DEBUG bulk failed, try per-node')
+    return _sum_rf3_per_node(rf_field, region, debug=debug)
+
+
+def _find_steps_with_rf(odb):
+    steps = []
+    try:
+        for name, step in odb.steps.items():
+            if name == 'Initial':
+                continue
+            has_rf = False
+            for frame in step.frames:
+                try:
+                    if 'RF' in frame.fieldOutputs.keys():
+                        has_rf = True
+                        break
+                except Exception:
+                    pass
+            if has_rf:
+                steps.append((name, step, len(step.frames)))
+    except Exception:
+        pass
+    steps.sort(key=lambda item: item[2], reverse=True)
+    return steps
 
 
 def _extract_rf3_xy(odb, inst_name, nset_name):
@@ -290,38 +342,39 @@ def _extract_rf3_xy(odb, inst_name, nset_name):
     if region is None:
         print('FAIL region %s %s' % (inst_name, nset_name))
         return None
-
     n_nodes = _region_node_count(region)
-    print('NSET %s: %d nodes in set (region=%s)' % (
+    print('NSET %s: %d nodes (region=%s)' % (
         nset_name, n_nodes, 'assembly' if not inst_name else inst_name))
-
-    step_name, step = _find_step(odb)
-    if step is None:
-        print('FAIL no step with frames')
+    steps = _find_steps_with_rf(odb)
+    if not steps:
+        print('FAIL no step with RF output')
         return None
-    print('STEP %s: %d frames for %s' % (step_name, len(step.frames), nset_name))
-
-    points = []
-    last_pos = '?'
-    n_matched = 0
-    for frame_idx, frame in enumerate(step.frames):
-        x_time = frame.frameValue
-        if 'RF' not in frame.fieldOutputs.keys():
-            continue
-        debug = (frame_idx == 0)
-        total_rf3, pos, n_matched = _sum_rf3_region_frame(
-            frame.fieldOutputs['RF'], region, debug=debug)
-        if total_rf3 is None:
-            continue
-        last_pos = pos
-        points.append((x_time, total_rf3))
-
-    if not points:
-        print('FAIL no RF3 data for %s (check RF field output in ODB)' % nset_name)
-        return None
-    print('OK %s: %d XY points, ~%d nodes/frame (pos=%s)' % (
-        nset_name, len(points), n_matched, last_pos))
-    return points
+    for step_name, step, nframes in steps:
+        print('TRY STEP %s: %d frames' % (step_name, nframes))
+        points = []
+        last_pos = '?'
+        n_matched = 0
+        for frame_idx, frame in enumerate(step.frames):
+            try:
+                x_time = frame.frameValue
+                if 'RF' not in frame.fieldOutputs.keys():
+                    continue
+                debug = (frame_idx == 0)
+                total_rf3, pos, n_matched = _sum_rf3_region_frame(
+                    frame.fieldOutputs['RF'], region, debug=debug)
+                if total_rf3 is None:
+                    continue
+                last_pos = pos
+                points.append((x_time, total_rf3))
+            except Exception:
+                continue
+        if points:
+            print('OK %s: %d XY points, ~%d nodes/frame (step=%s, pos=%s)' % (
+                nset_name, len(points), n_matched, step_name, last_pos))
+            return points
+        print('WARN step %s: no RF3 points for %s' % (step_name, nset_name))
+    print('FAIL no RF3 data for %s' % nset_name)
+    return None
 
 
 def _xydata_output_path(label):
@@ -329,53 +382,63 @@ def _xydata_output_path(label):
 
 
 def _write_xydata_points(points, path):
-    # X = Time hoac Arc length (frameValue); Y = Total_RF3
     yvals = [p[1] for p in points]
     with open(path, 'w') as handle:
         handle.write('X\\tY\\n')
         for x_time, total_rf3 in points:
             handle.write('%g\\t%g\\n' % (x_time, total_rf3))
-    print('WROTE XYDATA %d rows (X=time/frame, Y=Total_RF3), Y=[%g .. %g] -> %s' % (
-        len(points), min(yvals), max(yvals), path))
+    print('WROTE %s: %d rows, Y=[%g .. %g]' % (path, len(points), min(yvals), max(yvals)))
 
 
-if not os.path.isfile(ODB_PATH):
-    print('ERROR: ODB not found: ' + ODB_PATH)
-    sys.exit(1)
+def main():
+    if not os.path.isfile(ODB_PATH):
+        print('ERROR: ODB not found: ' + ODB_PATH)
+        sys.exit(1)
+    odb = None
+    try:
+        odb = openOdb(path=ODB_PATH, readOnly=True)
+        print('OPEN ODB: ' + ODB_PATH)
+        targets = _discover_targets(odb)
+        if not targets:
+            sys.exit(1)
+        xydata_written = []
+        for inst, nset, label in targets:
+            points = _extract_rf3_xy(odb, inst, nset)
+            if not points:
+                print('ERROR: failed %s' % label)
+                sys.exit(1)
+            out_path = _xydata_output_path(label)
+            _write_xydata_points(points, out_path)
+            xydata_written.append(out_path)
+        missing = [lb for lb in WANTED_LABELS if not os.path.isfile(_xydata_output_path(lb))]
+        if missing:
+            print('ERROR: missing ' + ', '.join(missing))
+            sys.exit(1)
+        summary_path = os.path.join(WORK_DIR, JOB_NAME + '_RF3_SUMMARY.txt')
+        with open(summary_path, 'w') as handle:
+            handle.write('RF.RF3 Unique Nodal, BC node set sum -> XYDATA\\n')
+            handle.write('X = time/arc length; Y = Total_RF3\\n')
+            handle.write('ODB: ' + ODB_PATH + '\\n')
+            for path in xydata_written:
+                handle.write('XYDATA: ' + path + '\\n')
+        print('DONE -> ' + summary_path)
+    finally:
+        if odb is not None:
+            try:
+                odb.close()
+            except Exception:
+                pass
 
-odb = openOdb(path=ODB_PATH, readOnly=True)
-print('OPEN ODB: ' + ODB_PATH)
 
-targets = _discover_targets(odb)
-if not targets:
-    odb.close()
-    sys.exit(1)
-
-xydata_written = []
-for inst, nset, label in targets:
-    points = _extract_rf3_xy(odb, inst, nset)
-    if not points:
-        continue
-    out_path = _xydata_output_path(label)
-    _write_xydata_points(points, out_path)
-    xydata_written.append(out_path)
-
-missing = [label for label in WANTED_LABELS if not os.path.isfile(_xydata_output_path(label))]
-if missing:
-    print('ERROR: missing xydata for ' + ', '.join(missing))
-    odb.close()
-    sys.exit(1)
-
-summary_path = os.path.join(WORK_DIR, JOB_NAME + '_RF3_SUMMARY.txt')
-with open(summary_path, 'w') as handle:
-    handle.write('Method: RF.RF3 Unique Nodal per node in BC node set, sum -> XYDATA\\n')
-    handle.write('X = frame time / arc length; Y = Total_RF3\\n')
-    handle.write('ODB: ' + ODB_PATH + '\\n')
-    for path in xydata_written:
-        handle.write('XYDATA: ' + path + '\\n')
-
-odb.close()
-print('DONE: RF3 post-process -> ' + summary_path)
+if __name__ == '__main__':
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print('FATAL: ' + str(exc))
+        traceback.print_exc()
+        sys.exit(1)
 """
 
 
