@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from file_io import write_text
+from file_io import write_abaqus_script, write_text
 from inputs import ProcessInputs
 from abaqus_job_settings import JOB_MEMORY_PERCENT, JOB_NUM_DOMAINS, resolve_job_num_cpus
 
@@ -93,7 +93,7 @@ def build_compression_stub_script(
     domains = JOB_NUM_DOMAINS
 
     return f"""# -*- coding: mbcs -*-
-# Generated — theo Original_Compression_StubColumn_Long.py
+# Generated - from Original_Compression_StubColumn_Long.py
 from part import *
 from material import *
 from section import *
@@ -245,11 +245,7 @@ def write_compression_stub_script(
     script_output: Path,
 ) -> Path:
     content = build_compression_stub_script(settings, inputs, work_dir=work_dir)
-    write_text(
-        script_output,
-        content,
-        encoding="mbcs" if sys.platform == "win32" else "utf-8",
-    )
+    write_abaqus_script(script_output, content)
     return script_output
 
 

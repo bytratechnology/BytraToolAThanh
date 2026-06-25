@@ -58,6 +58,39 @@ def run_with_retry(action, path, *, retries=MAX_RETRIES):
     raise PermissionError(locked_file_message(path)) from last_err
 
 
+_UNICODE_REPLACEMENTS = (
+    ("\u2014", "-"),
+    ("\u2013", "-"),
+    ("\u2192", "->"),
+    ("\u2026", "..."),
+)
+
+
+def prepare_abaqus_script(content: str) -> tuple[str, str]:
+    """Chuẩn hóa script Abaqus — ASCII/mbcs hoặc utf-8 nếu đường dẫn có Unicode."""
+    for old, new in _UNICODE_REPLACEMENTS:
+        content = content.replace(old, new)
+    try:
+        content.encode("ascii")
+        encoding = "mbcs" if sys.platform == "win32" else "utf-8"
+        if "# -*- coding:" not in content[:80]:
+            content = "# -*- coding: mbcs -*-\n" + content
+        return content, encoding
+    except UnicodeEncodeError:
+        encoding = "utf-8"
+        if "# -*- coding: mbcs" in content[:80]:
+            content = content.replace("# -*- coding: mbcs -*-", "# -*- coding: utf-8 -*-", 1)
+        elif "# -*- coding:" not in content[:80]:
+            content = "# -*- coding: utf-8 -*-\n" + content
+        return content, encoding
+
+
+def write_abaqus_script(path, content: str) -> None:
+    """Ghi script Abaqus/Viewer — tránh lỗi mbcs trên Windows."""
+    script, encoding = prepare_abaqus_script(content)
+    write_text(path, script, encoding=encoding)
+
+
 def write_text(path, content, encoding="utf-8"):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

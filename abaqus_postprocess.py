@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from abaqus_config import build_abaqus_subprocess_args, resolve_abaqus_command
-from file_io import write_text
+from file_io import write_abaqus_script, write_text
 
 POSTPROCESS_TIMEOUT = 600
 DEFAULT_NODE_SETS = (
@@ -56,7 +55,7 @@ def build_rf3_postprocess_script(
     node_sets_literal = repr(list(node_sets))
 
     return f"""# -*- coding: mbcs -*-
-# Auto — XY Data from ODB field output: RF3 (Unique Nodal) → sum
+# Auto - XY Data from ODB field output: RF3 (Unique Nodal) -> sum
 from abaqus import session
 from abaqusConstants import *
 import os
@@ -185,11 +184,7 @@ def run_odb_rf3_postprocess(
         job_name=job_name,
         node_sets=node_sets,
     )
-    write_text(
-        script_path,
-        script_content,
-        encoding="mbcs" if sys.platform == "win32" else "utf-8",
-    )
+    write_abaqus_script(script_path, script_content)
 
     if on_progress:
         on_progress("Bước 3: Post-process ODB — RF3 Unique Nodal, node set BC → sum…")

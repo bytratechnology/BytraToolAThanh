@@ -26,7 +26,7 @@ from abaqus_job_settings import (
     set_job_cpu_override,
 )
 from abaqus_postprocess import OdbPostprocessResult, run_odb_rf3_postprocess
-from file_io import write_text
+from file_io import write_abaqus_script, write_text
 
 IMPFECTION_SUFFIXES = ("_IMPERFECTION", "-IMPERFECTION", "_IMPFECTION", "-IMPFECTION")
 DATACHECK_TIMEOUT = 900
@@ -690,7 +690,7 @@ def build_abaqus_analysis_script(
     cpus = resolve_job_num_cpus()
 
     return f"""# -*- coding: mbcs -*-
-# Generated — chạy: abaqus cae noGUI=abaqus_run_imperfection.py
+# Generated - run: abaqus cae noGUI=abaqus_run_imperfection.py
 from abaqus import *
 from abaqusConstants import *
 import os
@@ -1004,11 +1004,7 @@ def run_abaqus_analysis(
             job_name=job_name,
             model_name=model_name,
         )
-        write_text(
-            script_path,
-            script_content,
-            encoding="mbcs" if sys.platform == "win32" else "utf-8",
-        )
+        write_abaqus_script(script_path, script_content)
         _notify(on_progress, f"Bước 2: Đã ghi script → {script_path.name}")
         analysis_proc = _run_cae_script(cmd, script_path, work_dir, job_name, on_progress)
         job_name = _wait_for_completion(work_dir, job_name, on_progress, process=analysis_proc)
