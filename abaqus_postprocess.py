@@ -164,7 +164,6 @@ if not os.path.isfile(ODB_PATH):
     raise IOError('ODB not found: ' + ODB_PATH)
 
 odb = session.openOdb(name=ODB_PATH)
-session.viewports['Viewport: 1'].setValues(displayedObject=odb)
 
 written = []
 xydata_written = []
