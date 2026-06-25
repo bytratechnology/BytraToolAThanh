@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,7 @@ ANALYSIS_MAX_WAIT_SECONDS = 7200  # giới hạn tối đa — xong sớm thì l
 POLL_INTERVAL_SECONDS = 2
 ODB_STABLE_POLLS = 5  # ~10s dung lượng .odb không đổi
 FINAL_VERIFY_DELAY_SECONDS = 2  # kiểm tra lại lần cuối trước khi báo xong
+WAIT_STATUS_LOG_SECONDS = 6  # in trạng thái chi tiết khi chờ solver
 ODB_OUTPUT_SUFFIX = "-TL"  # file .odb deliverable: {job}-TL.odb
 
 
@@ -417,11 +419,90 @@ def _analysis_failed(work_dir: Path, job_name: str) -> bool:
     return get_completion_status(work_dir, job_name) == "FAILED"
 
 
-def _read_sta_progress(work_dir: Path, job_name: str) -> str:
-    tail = _read_sta_tail(work_dir, job_name, lines=2).strip()
-    if not tail:
+def _parse_sta_progress_line(line: str) -> str:
+    """Rút increment / arc length từ dòng .sta (giống CAE Viewer)."""
+    text = line.strip()
+    if not text:
         return ""
-    return tail.splitlines()[-1].strip()[:100]
+
+    upper = text.upper()
+    if "INCREMENT" in upper:
+        parts: list[str] = []
+        inc = re.search(r"INCREMENT\s+(\d+)", upper)
+        if inc:
+            parts.append(f"Increment {inc.group(1)}")
+        arc = re.search(r"ARC\s+LENGTH\s*=\s*([\d.E+\-]+)", text, re.IGNORECASE)
+        if arc:
+            parts.append(f"Arc Length = {arc.group(1)}")
+        if "COMPLETED" in upper:
+            parts.append("COMPLETED")
+        if parts:
+            return ", ".join(parts)
+
+    cols = text.split()
+    if len(cols) >= 2 and cols[0].isdigit() and cols[1].isdigit():
+        return f"Step {cols[0]}, Inc {cols[1]}"
+
+    if upper.startswith("STEP") or "TOTAL TIME" in upper:
+        return ""
+
+    return text[:120]
+
+
+def _read_sta_progress(work_dir: Path, job_name: str) -> str:
+    sta = work_dir / f"{job_name}.sta"
+    if not sta.is_file():
+        return ""
+    try:
+        lines = [
+            line.strip()
+            for line in sta.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return ""
+
+    for line in reversed(lines[-12:]):
+        parsed = _parse_sta_progress_line(line)
+        if parsed:
+            return parsed
+    return ""
+
+
+def _build_wait_status_message(
+    work_dir: Path,
+    job_name: str,
+    odb: Path | None,
+    *,
+    pending_reason: str = "",
+) -> str:
+    """Tóm tắt trạng thái chờ — increment, .sta, .odb."""
+    parts: list[str] = []
+
+    progress = _read_sta_progress(work_dir, job_name)
+    if progress:
+        parts.append(progress)
+
+    sta_status = get_sta_status(work_dir, job_name)
+    if sta_status:
+        parts.append(f".sta {sta_status}")
+    elif not (work_dir / f"{job_name}.sta").is_file():
+        parts.append(".sta chưa có")
+    else:
+        parts.append(".sta RUNNING")
+
+    if odb is not None and odb.is_file():
+        parts.append(f".odb {_format_size(odb)}")
+    else:
+        parts.append(".odb chưa có")
+
+    if _job_lock_active(work_dir, job_name):
+        parts.append(".lck")
+
+    if pending_reason:
+        parts.append(pending_reason)
+
+    return " | ".join(parts)
 
 
 def _drain_subprocess(process: subprocess.Popen | None, *, grace_seconds: float = 30):
@@ -605,10 +686,9 @@ def _wait_for_completion(
     _notify(on_progress, f"Bước 2: Theo dõi tiến trình — poll {job_name}.sta / .odb mỗi {POLL_INTERVAL_SECONDS}s…")
     deadline = time.time() + ANALYSIS_MAX_WAIT_SECONDS
     last_log = 0.0
-    last_progress = ""
+    last_status = ""
     last_odb_size: int | None = None
     odb_stable_polls = 0
-    last_odb_notice = ""
 
     while time.time() < deadline:
         sta_status = get_sta_status(work_dir, job_name)
@@ -628,6 +708,7 @@ def _wait_for_completion(
             process=process,
         )
 
+        extra_reason = ""
         if ready and odb is not None:
             if _verify_build_finished(work_dir, job_name, odb):
                 _drain_subprocess(process)
@@ -637,30 +718,22 @@ def _wait_for_completion(
                 )
                 return
 
-            # Xác minh cuối thất bại — reset đếm ổn định, tiếp tục chờ.
             odb_stable_polls = 0
             last_odb_size = None
-            notice = f"Bước 2: .odb vẫn đang ghi — chờ ổn định hoàn toàn…"
-            if notice != last_odb_notice:
-                _notify(on_progress, notice)
-                last_odb_notice = notice
-                last_log = time.time()
+            extra_reason = ".odb vẫn đang ghi — chờ ổn định hoàn toàn"
         elif pending_reason:
-            now = time.time()
-            notice = f"Bước 2: {pending_reason}…"
-            if notice != last_odb_notice and now - last_log >= 8:
-                _notify(on_progress, notice)
-                last_odb_notice = notice
-                last_log = now
+            extra_reason = pending_reason
 
-        progress = _read_sta_progress(work_dir, job_name)
         now = time.time()
-        if progress and progress != last_progress:
-            _notify(on_progress, f"Bước 2: {progress}")
-            last_progress = progress
-            last_log = now
-        elif get_sta_status(work_dir, job_name) != "COMPLETED" and now - last_log >= 20:
-            _notify(on_progress, "Bước 2: Solver đang chạy, chờ build xong…")
+        status = _build_wait_status_message(
+            work_dir, job_name, odb, pending_reason=extra_reason
+        )
+        if status and (
+            status != last_status
+            or (sta_status != "COMPLETED" and now - last_log >= WAIT_STATUS_LOG_SECONDS)
+        ):
+            _notify(on_progress, f"Bước 2: {status}")
+            last_status = status
             last_log = now
 
         if process is not None and process.poll() is not None:
