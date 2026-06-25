@@ -143,22 +143,39 @@ def _xydata_output_path(label):
     return os.path.join(WORK_DIR, JOB_NAME + '-' + label + '-xydata-output.txt')
 
 
-def _write_xydata_txt(xy_data, path):
-    points = []
+def _read_xy_points(xy_data):
     try:
         points = list(xy_data.data)
+        if points:
+            return points
     except (AttributeError, TypeError):
-        try:
-            points = [(xy_data[i][0], xy_data[i][1]) for i in range(len(xy_data))]
-        except (TypeError, IndexError):
-            pass
+        pass
+    try:
+        coords = xy_data.dataCoords
+        xs = coords['X']
+        ys = coords['Y']
+        if xs is not None and ys is not None:
+            return list(zip(xs, ys))
+    except (AttributeError, TypeError, KeyError):
+        pass
+    try:
+        return [(xy_data[i][0], xy_data[i][1]) for i in range(len(xy_data))]
+    except (TypeError, IndexError):
+        pass
+    return []
+
+
+def _write_xydata_txt(xy_data, path):
+    points = _read_xy_points(xy_data)
     if not points:
         raise ValueError('XY data empty for ' + path)
+    yvals = [pt[1] for pt in points]
     with open(path, 'w') as handle:
         handle.write('X\\tY\\n')
         for pt in points:
             handle.write('%g\\t%g\\n' % (pt[0], pt[1]))
-    print('WROTE xydata %d points -> %s' % (len(points), path))
+    print('WROTE xydata %d points, Y=[%g .. %g] -> %s' % (
+        len(points), min(yvals), max(yvals), path))
 
 
 def _sum_xy_list(xy_list):
@@ -183,6 +200,10 @@ def _pull_xy_keys(keys_before):
 
 
 def _try_field_node_sets(odb, inst_name, nset_name):
+    assembly = odb.rootAssembly
+    inst_key = _match_instance(assembly, inst_name) if inst_name else None
+    if not inst_key:
+        return None, ['instance not found: ' + str(inst_name)]
     errors = []
     for pos_name, pos in _field_positions():
         keys_before = set(session.xyDataObjects.keys())
@@ -191,16 +212,57 @@ def _try_field_node_sets(odb, inst_name, nset_name):
                 odb=odb,
                 outputPosition=pos,
                 variable=(('RF', NODAL, (('RF3',),)),),
-                nodeSets=((inst_name, nset_name),),
+                nodeSets=((inst_key, nset_name),),
             )
             new_keys = _pull_xy_keys(keys_before)
             if new_keys:
                 print('OK xyDataListFromField nodeSets %s %s (%s, %d curves)' % (
-                    inst_name, nset_name, pos_name, len(new_keys)))
+                    inst_key, nset_name, pos_name, len(new_keys)))
                 return new_keys, []
         except Exception as exc:
-            errors.append('nodeSets/%s/%s: %s' % (pos_name, inst_name, exc))
+            errors.append('nodeSets/%s/%s: %s' % (pos_name, inst_key, exc))
     return None, errors
+
+
+def _try_per_node_rf3(odb, inst_name, nset_name):
+    # Giong CAE: RF:RF3 PI: PLATE-1 N: xxx tung node -> sum
+    assembly = odb.rootAssembly
+    inst_key = _match_instance(assembly, inst_name) if inst_name else None
+    if not inst_key:
+        return None, ['no instance for per-node']
+    instance = assembly.instances[inst_key]
+    if nset_name not in instance.nodeSets.keys():
+        return None, ['nset missing on instance']
+    labels = sorted(set(node.label for node in instance.nodeSets[nset_name].nodes))
+    if not labels:
+        return None, ['empty node set']
+    all_keys = []
+    errors = []
+    for label in labels:
+        got = False
+        for pos_name, pos in _field_positions():
+            keys_before = set(session.xyDataObjects.keys())
+            try:
+                session.xyDataListFromField(
+                    odb=odb,
+                    outputPosition=pos,
+                    variable=(('RF', NODAL, (('RF3',),)),),
+                    nodeLabels=((inst_key, (label,)),),
+                )
+                new_keys = _pull_xy_keys(keys_before)
+                if new_keys:
+                    all_keys.extend(new_keys)
+                    got = True
+                    break
+            except Exception as exc:
+                errors.append('node %s/%s: %s' % (label, pos_name, exc))
+        if not got:
+            print('WARN no RF3 curve for node %s on %s' % (label, inst_key))
+    if all_keys:
+        print('OK per-node RF3 %s %s (%d nodes -> %d curves)' % (
+            inst_key, nset_name, len(labels), len(all_keys)))
+        return all_keys, []
+    return None, errors[:8]
 
 
 def _try_field_node_labels(odb, inst_name, nset_name):
@@ -275,15 +337,27 @@ def _extract_and_sum(odb, instance_name, nset_name, label):
         if err:
             all_errors.extend(err)
 
+    if not new_keys and instance_name:
+        new_keys, err = _try_per_node_rf3(odb, instance_name, nset_name)
+        if err:
+            all_errors.extend(err)
+
     if not new_keys:
         print('FAIL %s %s: %s' % (instance_name or 'assembly', nset_name, ' | '.join(all_errors)))
         return None
 
     xy_list = tuple(session.xyDataObjects[key] for key in new_keys)
+    # Operate on XY Data: sum((curve1, curve2, ...)) like XYData-1 in CAE
     summed = _sum_xy_list(xy_list)
     if summed is None:
         print('FAIL sum empty for %s' % label)
         return None
+
+    preview = _read_xy_points(summed)
+    if not preview:
+        print('FAIL summed XY has no points for %s' % label)
+        return None
+    print('SUM %s -> XYData %d points (like CAE Operate sum)' % (label, len(preview)))
 
     xydata_path = _xydata_output_path(label)
     try:
