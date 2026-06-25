@@ -53,15 +53,15 @@ def build_rf3_postprocess_script(
     job_name: str,
     node_sets: tuple[tuple[str, str], ...] = DEFAULT_NODE_SETS,
 ) -> str:
-    """Sinh script viewer — Create XY Data -> RF3 Unique Nodal -> sum -> xydata txt."""
+    """Sinh script abaqus python — doc RF3 tu ODB, sum BC-1/BC-2, ghi xydata txt."""
     work = str(work_dir.resolve()).replace("\\", "/")
     odb = str(odb_path.resolve()).replace("\\", "/")
     node_sets_literal = repr(list(node_sets))
 
     return f"""# -*- coding: mbcs -*-
-# Auto - RF3 Unique Nodal from BC-1/BC-2 -> sum -> xydata-output.txt
-from abaqus import session
-from abaqusConstants import *
+# RF3 sum BC-1/BC-2 via odbAccess (abaqus python — khong can viewer xyDataObjects)
+from odbAccess import openOdb
+from abaqusConstants import NODAL
 import os
 import sys
 
@@ -71,13 +71,11 @@ JOB_NAME = '{job_name}'
 NODE_SETS = {node_sets_literal}
 WANTED_LABELS = ('BC-1', 'BC-2')
 
-
-def _field_positions():
-    positions = [('NODAL', NODAL)]
-    unique = globals().get('UNIQUE_NODAL')
-    if unique is not None:
-        positions.insert(0, ('UNIQUE_NODAL', unique))
-    return positions
+try:
+    from abaqusConstants import UNIQUE_NODAL
+    RF_POSITIONS = (UNIQUE_NODAL, NODAL)
+except ImportError:
+    RF_POSITIONS = (NODAL,)
 
 
 def _match_instance(assembly, hint):
@@ -91,313 +89,161 @@ def _match_instance(assembly, hint):
     return None
 
 
-def _discover_node_sets(odb):
+def _discover_targets(odb):
     assembly = odb.rootAssembly
     discovered = []
-    seen_labels = set()
+    seen = set()
 
     for inst_name, nset_name in NODE_SETS:
-        matched = _match_instance(assembly, inst_name)
-        if matched is None:
-            continue
-        inst = assembly.instances[matched]
-        if nset_name in inst.nodeSets.keys():
-            discovered.append((matched, nset_name, nset_name))
-            seen_labels.add(nset_name)
-            print('FOUND configured %s on %s' % (nset_name, matched))
+        inst_key = _match_instance(assembly, inst_name)
+        if inst_key and nset_name in assembly.instances[inst_key].nodeSets.keys():
+            discovered.append((inst_key, nset_name, nset_name))
+            seen.add(nset_name)
+            print('FOUND %s on %s' % (nset_name, inst_key))
 
     for nset_name in WANTED_LABELS:
-        if nset_name in seen_labels:
+        if nset_name in seen:
             continue
         for inst_name in sorted(assembly.instances.keys()):
-            inst = assembly.instances[inst_name]
-            if nset_name in inst.nodeSets.keys():
+            if nset_name in assembly.instances[inst_name].nodeSets.keys():
                 discovered.append((inst_name, nset_name, nset_name))
-                seen_labels.add(nset_name)
+                seen.add(nset_name)
                 print('FOUND %s on %s' % (nset_name, inst_name))
                 break
-        if nset_name not in seen_labels and nset_name in assembly.nodeSets.keys():
+        if nset_name not in seen and nset_name in assembly.nodeSets.keys():
             discovered.append(('', nset_name, nset_name))
-            seen_labels.add(nset_name)
-            print('FOUND assembly-level %s' % nset_name)
+            seen.add(nset_name)
+            print('FOUND assembly %s' % nset_name)
 
     if not discovered:
         print('ERROR: BC-1/BC-2 not found')
         print('Instances: ' + ', '.join(sorted(assembly.instances.keys())))
-        for inst_name in sorted(assembly.instances.keys()):
-            keys = sorted(assembly.instances[inst_name].nodeSets.keys())
-            if keys:
-                print('  %s nodeSets: %s' % (inst_name, ', '.join(keys[:30])))
-        asm_keys = sorted(assembly.nodeSets.keys())
-        if asm_keys:
-            print('  assembly nodeSets: ' + ', '.join(asm_keys[:30]))
     return discovered
 
 
-def _report_path(label):
-    safe = label.replace('-', '_')
-    return os.path.join(WORK_DIR, JOB_NAME + '_' + safe + '_RF3_sum.rpt')
+def _get_region(assembly, inst_name, nset_name):
+    if inst_name:
+        inst_key = _match_instance(assembly, inst_name)
+        if inst_key and nset_name in assembly.instances[inst_key].nodeSets.keys():
+            return assembly.instances[inst_key].nodeSets[nset_name]
+    if nset_name in assembly.nodeSets.keys():
+        return assembly.nodeSets[nset_name]
+    return None
+
+
+def _find_step(odb):
+    best = None
+    best_name = ''
+    best_frames = 0
+    for name, step in odb.steps.items():
+        if name == 'Initial':
+            continue
+        nframes = len(step.frames)
+        if nframes <= best_frames:
+            continue
+        has_rf = False
+        for frame in step.frames:
+            if 'RF' in frame.fieldOutputs.keys():
+                has_rf = True
+                break
+        if has_rf and nframes > best_frames:
+            best = step
+            best_name = name
+            best_frames = nframes
+    if best is None:
+        for name, step in odb.steps.items():
+            if len(step.frames) > best_frames:
+                best = step
+                best_name = name
+                best_frames = len(step.frames)
+    return best_name, best
+
+
+def _rf3_subset_sum(rf_field, region):
+    for pos in RF_POSITIONS:
+        try:
+            subset = rf_field.getSubset(region=region, position=pos)
+            values = subset.values
+            if values:
+                return sum(v.data[2] for v in values), pos
+        except Exception:
+            pass
+    try:
+        subset = rf_field.getSubset(region=region)
+        values = subset.values
+        if values:
+            return sum(v.data[2] for v in values), 'default'
+    except Exception:
+        pass
+    return None, None
+
+
+def _extract_rf3_xy(odb, inst_name, nset_name):
+    assembly = odb.rootAssembly
+    region = _get_region(assembly, inst_name, nset_name)
+    if region is None:
+        print('FAIL region %s %s' % (inst_name, nset_name))
+        return None
+
+    step_name, step = _find_step(odb)
+    if step is None:
+        print('FAIL no step with frames')
+        return None
+    print('STEP %s: %d frames for %s' % (step_name, len(step.frames), nset_name))
+
+    points = []
+    last_pos = '?'
+    for frame in step.frames:
+        t = frame.frameValue
+        if 'RF' not in frame.fieldOutputs.keys():
+            continue
+        rf3_sum, pos = _rf3_subset_sum(frame.fieldOutputs['RF'], region)
+        if rf3_sum is None:
+            continue
+        last_pos = pos
+        points.append((t, rf3_sum))
+
+    if not points:
+        print('FAIL no RF3 data for %s' % nset_name)
+        return None
+    print('OK RF3 sum %s: %d points (pos=%s)' % (nset_name, len(points), last_pos))
+    return points
 
 
 def _xydata_output_path(label):
     return os.path.join(WORK_DIR, JOB_NAME + '-' + label + '-xydata-output.txt')
 
 
-def _read_xy_points(xy_data):
-    try:
-        points = list(xy_data.data)
-        if points:
-            return points
-    except (AttributeError, TypeError):
-        pass
-    try:
-        coords = xy_data.dataCoords
-        xs = coords['X']
-        ys = coords['Y']
-        if xs is not None and ys is not None:
-            return list(zip(xs, ys))
-    except (AttributeError, TypeError, KeyError):
-        pass
-    try:
-        return [(xy_data[i][0], xy_data[i][1]) for i in range(len(xy_data))]
-    except (TypeError, IndexError):
-        pass
-    return []
-
-
-def _write_xydata_txt(xy_data, path):
-    points = _read_xy_points(xy_data)
-    if not points:
-        raise ValueError('XY data empty for ' + path)
-    yvals = [pt[1] for pt in points]
+def _write_xydata_points(points, path):
+    yvals = [p[1] for p in points]
     with open(path, 'w') as handle:
         handle.write('X\\tY\\n')
-        for pt in points:
-            handle.write('%g\\t%g\\n' % (pt[0], pt[1]))
+        for x, y in points:
+            handle.write('%g\\t%g\\n' % (x, y))
     print('WROTE xydata %d points, Y=[%g .. %g] -> %s' % (
         len(points), min(yvals), max(yvals), path))
-
-
-def _sum_xy_list(xy_list):
-    if not xy_list:
-        return None
-    if len(xy_list) == 1:
-        return xy_list[0]
-    sum_fn = getattr(session, 'XYDataSum', None)
-    if sum_fn is not None:
-        try:
-            return sum_fn(xyData=tuple(xy_list))
-        except Exception:
-            pass
-    total = xy_list[0]
-    for item in xy_list[1:]:
-        total = total + item
-    return total
-
-
-def _pull_xy_keys(keys_before):
-    return sorted(set(session.xyDataObjects.keys()) - keys_before)
-
-
-def _try_field_node_sets(odb, inst_name, nset_name):
-    assembly = odb.rootAssembly
-    inst_key = _match_instance(assembly, inst_name) if inst_name else None
-    if not inst_key:
-        return None, ['instance not found: ' + str(inst_name)]
-    errors = []
-    for pos_name, pos in _field_positions():
-        keys_before = set(session.xyDataObjects.keys())
-        try:
-            session.xyDataListFromField(
-                odb=odb,
-                outputPosition=pos,
-                variable=(('RF', NODAL, (('RF3',),)),),
-                nodeSets=((inst_key, nset_name),),
-            )
-            new_keys = _pull_xy_keys(keys_before)
-            if new_keys:
-                print('OK xyDataListFromField nodeSets %s %s (%s, %d curves)' % (
-                    inst_key, nset_name, pos_name, len(new_keys)))
-                return new_keys, []
-        except Exception as exc:
-            errors.append('nodeSets/%s/%s: %s' % (pos_name, inst_key, exc))
-    return None, errors
-
-
-def _try_per_node_rf3(odb, inst_name, nset_name):
-    # Giong CAE: RF:RF3 PI: PLATE-1 N: xxx tung node -> sum
-    assembly = odb.rootAssembly
-    inst_key = _match_instance(assembly, inst_name) if inst_name else None
-    if not inst_key:
-        return None, ['no instance for per-node']
-    instance = assembly.instances[inst_key]
-    if nset_name not in instance.nodeSets.keys():
-        return None, ['nset missing on instance']
-    labels = sorted(set(node.label for node in instance.nodeSets[nset_name].nodes))
-    if not labels:
-        return None, ['empty node set']
-    all_keys = []
-    errors = []
-    for label in labels:
-        got = False
-        for pos_name, pos in _field_positions():
-            keys_before = set(session.xyDataObjects.keys())
-            try:
-                session.xyDataListFromField(
-                    odb=odb,
-                    outputPosition=pos,
-                    variable=(('RF', NODAL, (('RF3',),)),),
-                    nodeLabels=((inst_key, (label,)),),
-                )
-                new_keys = _pull_xy_keys(keys_before)
-                if new_keys:
-                    all_keys.extend(new_keys)
-                    got = True
-                    break
-            except Exception as exc:
-                errors.append('node %s/%s: %s' % (label, pos_name, exc))
-        if not got:
-            print('WARN no RF3 curve for node %s on %s' % (label, inst_key))
-    if all_keys:
-        print('OK per-node RF3 %s %s (%d nodes -> %d curves)' % (
-            inst_key, nset_name, len(labels), len(all_keys)))
-        return all_keys, []
-    return None, errors[:8]
-
-
-def _try_field_node_labels(odb, inst_name, nset_name):
-    assembly = odb.rootAssembly
-    inst_key = _match_instance(assembly, inst_name) if inst_name else None
-    if not inst_key:
-        return None, ['no instance']
-    instance = assembly.instances[inst_key]
-    if nset_name not in instance.nodeSets.keys():
-        return None, ['nset missing on instance']
-    labels = tuple(sorted(set(node.label for node in instance.nodeSets[nset_name].nodes)))
-    if not labels:
-        return None, ['empty node set']
-    errors = []
-    for pos_name, pos in _field_positions():
-        keys_before = set(session.xyDataObjects.keys())
-        try:
-            session.xyDataListFromField(
-                odb=odb,
-                outputPosition=pos,
-                variable=(('RF', NODAL, (('RF3',),)),),
-                nodeLabels=((inst_key, labels),),
-            )
-            new_keys = _pull_xy_keys(keys_before)
-            if new_keys:
-                print('OK xyDataListFromField nodeLabels %s %s (%s, %d nodes)' % (
-                    inst_key, nset_name, pos_name, len(labels)))
-                return new_keys, []
-        except Exception as exc:
-            errors.append('nodeLabels/%s: %s' % (pos_name, exc))
-    return None, errors
-
-
-def _try_field_assembly_nset(odb, nset_name):
-    assembly = odb.rootAssembly
-    if nset_name not in assembly.nodeSets.keys():
-        return None, ['no assembly nset']
-    errors = []
-    for pos_name, pos in _field_positions():
-        keys_before = set(session.xyDataObjects.keys())
-        try:
-            session.xyDataListFromField(
-                odb=odb,
-                outputPosition=pos,
-                variable=(('RF', NODAL, (('RF3',),)),),
-                nodeSets=((nset_name,),),
-            )
-            new_keys = _pull_xy_keys(keys_before)
-            if new_keys:
-                print('OK xyDataListFromField assembly %s (%s)' % (nset_name, pos_name))
-                return new_keys, []
-        except Exception as exc:
-            errors.append('assembly/%s: %s' % (pos_name, exc))
-    return None, errors
-
-
-def _extract_and_sum(odb, instance_name, nset_name, label):
-    new_keys = None
-    all_errors = []
-
-    if instance_name:
-        new_keys, err = _try_field_node_sets(odb, instance_name, nset_name)
-        if err:
-            all_errors.extend(err)
-        if not new_keys:
-            new_keys, err = _try_field_node_labels(odb, instance_name, nset_name)
-            if err:
-                all_errors.extend(err)
-
-    if not new_keys:
-        new_keys, err = _try_field_assembly_nset(odb, nset_name)
-        if err:
-            all_errors.extend(err)
-
-    if not new_keys and instance_name:
-        new_keys, err = _try_per_node_rf3(odb, instance_name, nset_name)
-        if err:
-            all_errors.extend(err)
-
-    if not new_keys:
-        print('FAIL %s %s: %s' % (instance_name or 'assembly', nset_name, ' | '.join(all_errors)))
-        return None
-
-    xy_list = tuple(session.xyDataObjects[key] for key in new_keys)
-    # Operate on XY Data: sum((curve1, curve2, ...)) like XYData-1 in CAE
-    summed = _sum_xy_list(xy_list)
-    if summed is None:
-        print('FAIL sum empty for %s' % label)
-        return None
-
-    preview = _read_xy_points(summed)
-    if not preview:
-        print('FAIL summed XY has no points for %s' % label)
-        return None
-    print('SUM %s -> XYData %d points (like CAE Operate sum)' % (label, len(preview)))
-
-    xydata_path = _xydata_output_path(label)
-    try:
-        _write_xydata_txt(summed, xydata_path)
-    except Exception as exc:
-        print('FAIL write xydata %s: %s' % (label, exc))
-        return None
-
-    out_path = _report_path(label)
-    try:
-        session.writeXYReport(fileName=out_path, appendMode=OFF, xyData=(summed,))
-    except Exception as exc:
-        print('WARN writeXYReport %s: %s' % (label, exc))
-        out_path = None
-
-    print('OK %s (%d nodes) -> %s' % (label, len(new_keys), xydata_path))
-    return out_path, xydata_path
 
 
 if not os.path.isfile(ODB_PATH):
     print('ERROR: ODB not found: ' + ODB_PATH)
     sys.exit(1)
 
-odb = session.openOdb(name=ODB_PATH)
+odb = openOdb(path=ODB_PATH, readOnly=True)
 print('OPEN ODB: ' + ODB_PATH)
 
-targets = _discover_node_sets(odb)
+targets = _discover_targets(odb)
 if not targets:
     odb.close()
     sys.exit(1)
 
-written = []
 xydata_written = []
 for inst, nset, label in targets:
-    result = _extract_and_sum(odb, inst, nset, label)
-    if result:
-        rpt_path, xy_path = result
-        if rpt_path:
-            written.append(rpt_path)
-        xydata_written.append(xy_path)
+    points = _extract_rf3_xy(odb, inst, nset)
+    if not points:
+        continue
+    out_path = _xydata_output_path(label)
+    _write_xydata_points(points, out_path)
+    xydata_written.append(out_path)
 
 missing = [label for label in WANTED_LABELS if not os.path.isfile(_xydata_output_path(label))]
 if missing:
@@ -407,10 +253,8 @@ if missing:
 
 summary_path = os.path.join(WORK_DIR, JOB_NAME + '_RF3_SUMMARY.txt')
 with open(summary_path, 'w') as handle:
-    handle.write('RF3 post-process (Unique Nodal, sum per node set)\\n')
+    handle.write('RF3 post-process (odbAccess sum per node set)\\n')
     handle.write('ODB: ' + ODB_PATH + '\\n')
-    for path in written:
-        handle.write('REPORT: ' + path + '\\n')
     for path in xydata_written:
         handle.write('XYDATA: ' + path + '\\n')
 
@@ -435,8 +279,8 @@ def _validate_xydata_file(path: Path) -> bool:
     return any(not line.lower().startswith("x") for line in lines[1:])
 
 
-def _run_viewer_script(cmd: str, script_path: Path, work_dir: Path, timeout: int) -> tuple[subprocess.CompletedProcess, str]:
-    argv = build_abaqus_subprocess_args(cmd, ["viewer", f"noGUI={script_path.name}"])
+def _run_postprocess_script(cmd: str, script_path: Path, work_dir: Path, timeout: int) -> tuple[subprocess.CompletedProcess, str]:
+    argv = build_abaqus_subprocess_args(cmd, ["python", script_path.name])
     result = subprocess.run(
         argv,
         cwd=str(work_dir),
@@ -480,10 +324,10 @@ def run_odb_rf3_postprocess(
     write_abaqus_script(script_path, script_content)
 
     if on_progress:
-        on_progress("Bước 3: Post-process ODB — RF3 Unique Nodal, node set BC → sum…")
+        on_progress("Bước 3: Post-process ODB — RF3 sum BC-1/BC-2 (odbAccess)…")
 
     cmd = resolve_abaqus_command(abaqus_cmd)
-    result, log = _run_viewer_script(cmd, script_path, work_dir, POSTPROCESS_TIMEOUT)
+    result, log = _run_postprocess_script(cmd, script_path, work_dir, POSTPROCESS_TIMEOUT)
 
     report_paths = [
         path
@@ -521,7 +365,7 @@ def run_odb_rf3_postprocess(
     if result.returncode != 0:
         log_path = postprocess_log_path(work_dir)
         if on_progress:
-            on_progress(f"Bước 3: Canh bao viewer exit {result.returncode} — da co output, xem {log_path.name}")
+            on_progress(f"Bước 3: Canh bao python exit {result.returncode} — da co output, xem {log_path.name}")
 
     if on_progress:
         for path in report_paths:
