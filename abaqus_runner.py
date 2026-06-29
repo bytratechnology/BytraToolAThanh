@@ -64,7 +64,9 @@ class AbaqusRunResult:
         if self.max_rf3_bc1 is not None:
             lines.append(f"→ Max RF3 (BC-1) = {self.max_rf3_bc1:g}")
         if self.elapsed_seconds > 0:
-            lines.append(f"→ Thời gian: {self.elapsed_seconds:.0f}s (log)")
+            from result_deliverables import format_duration
+
+            lines.append(f"→ Thời gian chạy: {format_duration(self.elapsed_seconds)}")
         return "\n".join(lines)
 
 
@@ -946,6 +948,17 @@ def _wait_for_completion(
         )
 
 
+def _resolve_model_run_time_seconds(
+    *,
+    started_at: float,
+    model_started_at: float | None,
+) -> float:
+    """Thời gian chạy một model — ưu tiên mốc batch (MATLAB + Abaqus + Bước 3)."""
+    if model_started_at is not None:
+        return max(0.0, time.monotonic() - model_started_at)
+    return max(0.0, time.monotonic() - started_at)
+
+
 def run_abaqus_analysis(
     inp_path: Path,
     *,
@@ -954,6 +967,7 @@ def run_abaqus_analysis(
     job_name: str | None = None,
     abaqus_cmd: str | None = None,
     num_cpus: int | None = None,
+    model_started_at: float | None = None,
     on_progress=None,
 ) -> AbaqusRunResult:
     """
@@ -1040,18 +1054,25 @@ def run_abaqus_analysis(
         )
         rf3_report_paths = postprocess.report_paths
         rf3_xydata_paths = postprocess.xydata_output_paths
-        elapsed = time.monotonic() - started_at
+        run_time_seconds = _resolve_model_run_time_seconds(
+            started_at=started_at,
+            model_started_at=model_started_at,
+        )
         bc1_xydata_path, max_rf3_bc1, _removed = finalize_model_deliverables(
             work_dir,
             job_name=job_name,
             imperfection_inp=inp_path,
+            run_time_seconds=run_time_seconds,
             model_name=inp_path.name,
             on_progress=on_progress,
         )
     except Exception as exc:
         _notify(on_progress, f"Bước 3: Post-process / tổng hợp thất bại — {exc}")
 
-    elapsed_seconds = time.monotonic() - started_at
+    elapsed_seconds = _resolve_model_run_time_seconds(
+        started_at=started_at,
+        model_started_at=model_started_at,
+    )
     if max_rf3_bc1 is not None:
         _notify(on_progress, f"Bước 3: Excel tổng hợp → {summary_excel_path(work_dir.parent).name}")
 

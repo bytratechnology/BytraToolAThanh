@@ -30,7 +30,7 @@ from inputs import (
 )
 from main import run_processing
 from paths import DEFAULT_PATHS, ProjectPaths
-from result_deliverables import summary_excel_path
+from result_deliverables import format_duration, summary_excel_path
 
 INPUT_SECTIONS = [
     (
@@ -1041,6 +1041,8 @@ class InputForm(tk.Tk):
                 extra = ""
                 if result.max_rf3_bc1 is not None:
                     extra = f"\nMax RF3 (BC-1): {result.max_rf3_bc1:g}"
+                if result.run_time_seconds:
+                    extra += f"\nThời gian chạy: {format_duration(result.run_time_seconds)}"
                 excel = summary_excel_path(base_paths.output_dir)
                 if excel.is_file():
                     extra += f"\nExcel tổng hợp: {excel}"
@@ -1062,7 +1064,10 @@ class InputForm(tk.Tk):
         lines = []
         for result in results:
             if result.success:
-                lines.append(f"✓ {result.inp_path.name} (L={result.length_l:g})")
+                time_note = ""
+                if result.run_time_seconds:
+                    time_note = f" — {format_duration(result.run_time_seconds)}"
+                lines.append(f"✓ {result.inp_path.name} (L={result.length_l:g}){time_note}")
             else:
                 lines.append(f"✗ {result.inp_path.name}: {result.error}")
 

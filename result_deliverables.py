@@ -16,7 +16,7 @@ from file_io import remove_tree, replace_file, run_with_retry
 SUMMARY_EXCEL_NAME = "TongHop_KetQua.xlsx"
 BC1_NODE_SET = "BC-1"
 ODB_OUTPUT_SUFFIX = "-TL"
-EXCEL_HEADERS = ("Tên model", "Max RF3 (BC-1)")
+EXCEL_HEADERS = ("Tên model", "Thời gian chạy", "Max RF3 (BC-1)")
 EXCEL_SAVE_RETRIES = 15
 EXCEL_SAVE_DELAY = 1.0
 
@@ -24,7 +24,23 @@ EXCEL_SAVE_DELAY = 1.0
 @dataclass
 class ModelSummaryRow:
     model_name: str
+    run_time_seconds: float
     max_rf3_bc1: float
+
+    @property
+    def run_time_display(self) -> str:
+        return format_duration(self.run_time_seconds)
+
+
+def format_duration(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 def summary_excel_path(output_root: Path) -> Path:
@@ -96,26 +112,24 @@ def cleanup_model_output_dir(output_dir: Path, *, keep_paths: set[Path]) -> list
     return removed
 
 
-def _migrate_legacy_time_column(ws: Worksheet) -> None:
-    """File cũ 3 cột (có Thời gian chạy) -> 2 cột."""
-    header_b = str(ws.cell(1, 2).value or "").strip().lower()
-    if "thời gian" not in header_b and "thoi gian" not in header_b:
-        return
-    for row_idx in range(2, ws.max_row + 1):
-        ws.cell(row_idx, 2).value = ws.cell(row_idx, 3).value
-    ws.delete_cols(2, 1)
-    ws.cell(1, 1, EXCEL_HEADERS[0])
-    ws.cell(1, 2, EXCEL_HEADERS[1])
-
-
 def _ensure_headers(ws: Worksheet) -> None:
     if ws.max_row < 1 or not ws.cell(1, 1).value:
-        ws.cell(1, 1, EXCEL_HEADERS[0])
-        ws.cell(1, 2, EXCEL_HEADERS[1])
+        for col, header in enumerate(EXCEL_HEADERS, start=1):
+            ws.cell(1, col, header)
         return
-    _migrate_legacy_time_column(ws)
-    ws.cell(1, 1, EXCEL_HEADERS[0])
-    ws.cell(1, 2, EXCEL_HEADERS[1])
+
+    header_b = str(ws.cell(1, 2).value or "").strip().lower()
+    header_c = str(ws.cell(1, 3).value or "").strip().lower() if ws.max_column >= 3 else ""
+
+    # File 2 cột cũ (không có Thời gian chạy) -> chèn cột thời gian
+    if "max" in header_b and "rf3" in header_b:
+        ws.insert_cols(2)
+        for row_idx in range(2, ws.max_row + 1):
+            ws.cell(row_idx, 3).value = ws.cell(row_idx, 2).value
+            ws.cell(row_idx, 2).value = None
+
+    for col, header in enumerate(EXCEL_HEADERS, start=1):
+        ws.cell(1, col, header)
 
 
 def _find_model_row(ws: Worksheet, model_name: str) -> int | None:
@@ -132,7 +146,8 @@ def _upsert_row_in_sheet(ws: Worksheet, row: ModelSummaryRow) -> None:
     if target is None:
         target = ws.max_row + 1
     ws.cell(target, 1, row.model_name)
-    ws.cell(target, 2, row.max_rf3_bc1)
+    ws.cell(target, 2, row.run_time_display)
+    ws.cell(target, 3, row.max_rf3_bc1)
 
 
 def _save_workbook_atomic(wb: openpyxl.Workbook, excel_path: Path) -> None:
@@ -156,7 +171,7 @@ def _save_workbook_atomic(wb: openpyxl.Workbook, excel_path: Path) -> None:
 
 
 def upsert_summary_row(excel_path: Path, row: ModelSummaryRow) -> Path:
-    """Thêm hoặc cập nhật một dòng — giữ nguyên các dòng khác, ghi qua file tạm."""
+    """Cập nhật một dòng theo tên model — các dòng khác giữ nguyên."""
     excel_path = excel_path.resolve()
 
     def do_upsert() -> None:
@@ -192,6 +207,7 @@ def finalize_model_deliverables(
     *,
     job_name: str,
     imperfection_inp: Path,
+    run_time_seconds: float,
     model_name: str | None = None,
     on_progress=None,
 ) -> tuple[Path, float, list[str]]:
@@ -214,11 +230,18 @@ def finalize_model_deliverables(
     excel_path = summary_excel_path(output_dir.parent)
     upsert_summary_row(
         excel_path,
-        ModelSummaryRow(model_name=label, max_rf3_bc1=max_rf3),
+        ModelSummaryRow(
+            model_name=label,
+            run_time_seconds=run_time_seconds,
+            max_rf3_bc1=max_rf3,
+        ),
     )
 
     if on_progress:
-        on_progress(f"Bước 3: Max RF3 (BC-1) = {max_rf3:g}")
+        on_progress(
+            f"Bước 3: Excel — {label} | Thời gian: {format_duration(run_time_seconds)} | "
+            f"Max RF3 (BC-1) = {max_rf3:g}"
+        )
         on_progress(f"Đã dọn {len(removed)} file/thư mục — giữ .inp, .odb, BC-1 xydata")
         on_progress(f"Excel tổng hợp → {excel_path.name}")
 
@@ -232,6 +255,7 @@ __all__ = [
     "cleanup_model_output_dir",
     "deliverable_keep_paths",
     "finalize_model_deliverables",
+    "format_duration",
     "parse_xydata_max_rf3",
     "summary_excel_path",
     "upsert_summary_row",

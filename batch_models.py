@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from main import run_processing
 from matlab_runner import run_matlab_script
 from matlab_writer import update_matlab_parameters
 from paths import ProjectPaths
+from result_deliverables import format_duration
 
 LENGTH_MM_PATTERN = re.compile(r"L(\d+)mm", re.IGNORECASE)
 LENGTH_M_PATTERN = re.compile(r"L(\d+)p(\d+)m", re.IGNORECASE)
@@ -107,6 +109,7 @@ def run_single_model_pipeline(
 
     model_inputs = replace(inputs, length_l=length_l)
     paths = paths_for_model(base_paths, inp_path)
+    model_started_at = time.monotonic()
 
     try:
         log(f"Bước 2: {inp_path.name} — Length L = {length_l:g} mm")
@@ -155,9 +158,15 @@ def run_single_model_pipeline(
                 job_name=job_name or None,
                 abaqus_cmd=abaqus_cmd,
                 num_cpus=abaqus_cpus,
+                model_started_at=model_started_at,
                 on_progress=on_progress,
             )
             detail = f"{detail}\n{abaqus_result.summary()}"
+            if abaqus_result.elapsed_seconds > 0:
+                log(
+                    f"Bước 2: {inp_path.name} — thời gian chạy: "
+                    f"{format_duration(abaqus_result.elapsed_seconds)}"
+                )
 
         return BatchModelResult(
             inp_path=inp_path,
