@@ -79,6 +79,7 @@ def run_single_model_pipeline(
     run_abaqus: bool,
     abaqus_cmd: str | None,
     job_name: str | None,
+    abaqus_cpus: int | None = None,
     include_step1: bool = True,
     length_l_override: float | None = None,
     n_override: float | None = None,
@@ -153,6 +154,7 @@ def run_single_model_pipeline(
                 script_output=paths.abaqus_script_output,
                 job_name=job_name or None,
                 abaqus_cmd=abaqus_cmd,
+                num_cpus=abaqus_cpus,
                 on_progress=on_progress,
             )
             detail = f"{detail}\n{abaqus_result.summary()}"
@@ -184,6 +186,7 @@ def run_batch_models(
     run_abaqus: bool,
     abaqus_cmd: str | None,
     job_name: str | None,
+    abaqus_cpus: int | None = None,
     include_step1: bool = True,
     per_model_overrides: dict[str, tuple[float, float]] | None = None,
     on_progress=None,
@@ -204,6 +207,7 @@ def run_batch_models(
                 run_abaqus=run_abaqus,
                 abaqus_cmd=abaqus_cmd,
                 job_name=job_name,
+                abaqus_cpus=abaqus_cpus,
                 include_step1=include_step1,
                 length_l_override=length_override,
                 n_override=n_override,

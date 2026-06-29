@@ -24,6 +24,7 @@ from abaqus_job_settings import (
     patch_inp_riks_no_max_lpf,
     resolve_job_num_cpus,
     set_job_cpu_override,
+    set_user_job_cpus,
 )
 from abaqus_postprocess import OdbPostprocessResult, run_odb_rf3_postprocess
 from file_io import write_abaqus_script, write_text
@@ -63,9 +64,7 @@ class AbaqusRunResult:
         if self.max_rf3_bc1 is not None:
             lines.append(f"→ Max RF3 (BC-1) = {self.max_rf3_bc1:g}")
         if self.elapsed_seconds > 0:
-            from result_deliverables import format_duration
-
-            lines.append(f"→ Thời gian chạy: {format_duration(self.elapsed_seconds)}")
+            lines.append(f"→ Thời gian: {self.elapsed_seconds:.0f}s (log)")
         return "\n".join(lines)
 
 
@@ -954,6 +953,7 @@ def run_abaqus_analysis(
     script_output: Path | None = None,
     job_name: str | None = None,
     abaqus_cmd: str | None = None,
+    num_cpus: int | None = None,
     on_progress=None,
 ) -> AbaqusRunResult:
     """
@@ -990,6 +990,9 @@ def run_abaqus_analysis(
 
     if patch_inp_riks_no_max_lpf(inp_path):
         _notify(on_progress, "Bước 2: Đã chỉnh .inp — *Static, riks không giới hạn maxLPF")
+
+    if num_cpus is not None:
+        set_user_job_cpus(num_cpus)
 
     started_at = time.monotonic()
     analysis_proc: subprocess.Popen | None = None
@@ -1042,7 +1045,6 @@ def run_abaqus_analysis(
             work_dir,
             job_name=job_name,
             imperfection_inp=inp_path,
-            run_time_seconds=elapsed,
             model_name=inp_path.name,
             on_progress=on_progress,
         )

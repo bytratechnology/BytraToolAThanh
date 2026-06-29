@@ -12,6 +12,7 @@ from abaqus_config import (
     save_abaqus_command,
     search_abaqus_candidates,
 )
+from abaqus_job_settings import JOB_NUM_CPUS, resolve_job_num_cpus
 from batch_models import (
     is_source_inp,
     parse_length_mm_from_name,
@@ -29,7 +30,7 @@ from inputs import (
 )
 from main import run_processing
 from paths import DEFAULT_PATHS, ProjectPaths
-from result_deliverables import format_duration, summary_excel_path
+from result_deliverables import summary_excel_path
 
 INPUT_SECTIONS = [
     (
@@ -72,8 +73,8 @@ class InputForm(tk.Tk):
     def __init__(self, paths=None, node_count=None):
         super().__init__()
         self.title(APP_NAME)
-        self.minsize(560, 680)
-        self.geometry("620x860")
+        self.minsize(820, 680)
+        self.geometry("920x860")
         self.configure(bg="#f0f0f0")
 
         self.paths = (paths or DEFAULT_PATHS).resolve()
@@ -156,7 +157,12 @@ class InputForm(tk.Tk):
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
         )
-        canvas.create_window((0, 0), window=scroll_body, anchor="nw", width=580)
+        canvas_window = canvas.create_window((0, 0), window=scroll_body, anchor="nw")
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        canvas.bind("<Configure>", _on_canvas_configure)
         canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side="left", fill="both", expand=True)
@@ -186,23 +192,29 @@ class InputForm(tk.Tk):
         inp_list_wrap = ttk.Frame(paths_frame)
         inp_list_wrap.grid(row=0, column=1, sticky="ew", pady=4)
         inp_list_wrap.columnconfigure(0, weight=1)
+        inp_list_wrap.columnconfigure(1, weight=0, minsize=92)
+        inp_list_wrap.columnconfigure(2, weight=0, minsize=92)
 
         models_header = ttk.Frame(inp_list_wrap)
-        models_header.grid(row=0, column=0, sticky="ew")
+        models_header.grid(row=0, column=0, columnspan=3, sticky="ew")
         models_header.columnconfigure(0, weight=1)
+        models_header.columnconfigure(1, weight=0, minsize=92)
+        models_header.columnconfigure(2, weight=0, minsize=92)
         ttk.Label(models_header, text="File .inp", style="Field.TLabel").grid(
             row=0, column=0, sticky="w"
         )
-        ttk.Label(models_header, text="L (mm)", style="Field.TLabel", width=9).grid(
-            row=0, column=1, padx=(6, 0)
+        ttk.Label(models_header, text="L (mm)", style="Field.TLabel").grid(
+            row=0, column=1, padx=(6, 0), sticky="e"
         )
-        ttk.Label(models_header, text="n (node)", style="Field.TLabel", width=9).grid(
-            row=0, column=2, padx=(6, 0)
+        ttk.Label(models_header, text="n (node)", style="Field.TLabel").grid(
+            row=0, column=2, padx=(6, 0), sticky="e"
         )
 
         self.inp_models_rows_frame = ttk.Frame(inp_list_wrap)
-        self.inp_models_rows_frame.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.inp_models_rows_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
         self.inp_models_rows_frame.columnconfigure(0, weight=1)
+        self.inp_models_rows_frame.columnconfigure(1, weight=0, minsize=92)
+        self.inp_models_rows_frame.columnconfigure(2, weight=0, minsize=92)
 
         inp_btn_frame = ttk.Frame(paths_frame)
         inp_btn_frame.grid(row=0, column=2, padx=(6, 0), pady=4, sticky="n")
@@ -308,15 +320,40 @@ class InputForm(tk.Tk):
         self.abaqus_job_entry = ttk.Entry(abaqus_frame, font=("Helvetica", 11))
         self.abaqus_job_entry.grid(row=0, column=1, sticky="ew", pady=5)
 
+        max_cpus = JOB_NUM_CPUS
+        default_cpus = min(resolve_job_num_cpus(), max_cpus)
+        self.abaqus_cpus_var = tk.StringVar(value=str(default_cpus))
+        ttk.Label(
+            abaqus_frame,
+            text="Số CPU (1–8)",
+            style="Field.TLabel",
+        ).grid(row=1, column=0, sticky="e", padx=(0, 12), pady=5)
+        cpus_wrap = ttk.Frame(abaqus_frame)
+        cpus_wrap.grid(row=1, column=1, sticky="w", pady=5)
+        self.abaqus_cpus_spin = ttk.Spinbox(
+            cpus_wrap,
+            from_=1,
+            to=8,
+            textvariable=self.abaqus_cpus_var,
+            width=6,
+            font=("Helvetica", 11),
+        )
+        self.abaqus_cpus_spin.pack(side="left")
+        ttk.Label(
+            cpus_wrap,
+            text="luồng (Threads) — mặc định theo lõi vật lý",
+            style="Sub.TLabel",
+        ).pack(side="left", padx=(8, 0))
+
         self.run_abaqus_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             abaqus_frame,
             text="Chạy phân tích Abaqus tự động sau khi tạo *_IMPERFECTION.inp",
             variable=self.run_abaqus_var,
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         ttk.Label(abaqus_frame, text="Lệnh Abaqus", style="Field.TLabel").grid(
-            row=2, column=0, sticky="e", padx=(0, 12), pady=5
+            row=3, column=0, sticky="e", padx=(0, 12), pady=5
         )
         self.abaqus_path_var = tk.StringVar()
         abaqus_path_entry = ttk.Entry(
@@ -324,11 +361,11 @@ class InputForm(tk.Tk):
             textvariable=self.abaqus_path_var,
             font=("Helvetica", 10),
         )
-        abaqus_path_entry.grid(row=2, column=1, sticky="ew", pady=5)
+        abaqus_path_entry.grid(row=3, column=1, sticky="ew", pady=5)
         abaqus_path_entry.bind("<FocusOut>", lambda _e: self._refresh_abaqus_status())
 
         abaqus_btn_frame = ttk.Frame(abaqus_frame)
-        abaqus_btn_frame.grid(row=2, column=2, padx=(6, 0), pady=5)
+        abaqus_btn_frame.grid(row=3, column=2, padx=(6, 0), pady=5)
         ttk.Button(
             abaqus_btn_frame,
             text="…",
@@ -343,7 +380,7 @@ class InputForm(tk.Tk):
         ).pack(side="left", padx=(4, 0))
 
         self.abaqus_status_label = ttk.Label(abaqus_frame, text="", style="Sub.TLabel")
-        self.abaqus_status_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.abaqus_status_label.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         action_frame = ttk.LabelFrame(
             scroll_body,
@@ -481,6 +518,16 @@ class InputForm(tk.Tk):
                 return text
         return None
 
+    def _read_abaqus_cpus(self) -> int:
+        if not self.abaqus_cpus_var:
+            return resolve_job_num_cpus()
+        text = self.abaqus_cpus_var.get().strip()
+        try:
+            value = int(text)
+        except ValueError:
+            value = resolve_job_num_cpus()
+        return max(1, min(JOB_NUM_CPUS, value))
+
     def get_inp_model_paths(self) -> list[Path]:
         return list(self.inp_model_paths)
 
@@ -513,7 +560,7 @@ class InputForm(tk.Tk):
         for key, row in self.inp_model_rows.items():
             bg = "#d6eaf8" if key in self._inp_model_selected else "#f0f0f0"
             row["row_frame"].configure(background=bg)
-            row["name_label"].configure(background=bg)
+            row["name_entry"].configure(background=bg, readonlybackground=bg)
 
     def _on_model_row_click(self, event, key: str):
         additive = bool(event.state & 0x4 or event.state & 0x8 or event.state & 0x20000)
@@ -550,27 +597,32 @@ class InputForm(tk.Tk):
             n_var = tk.StringVar(value=n_text)
 
             row_frame = tk.Frame(self.inp_models_rows_frame, bg="#f0f0f0")
-            row_frame.grid(row=index, column=0, sticky="ew", pady=1)
+            row_frame.grid(row=index, column=0, columnspan=3, sticky="ew", pady=1)
             row_frame.columnconfigure(0, weight=1)
+            row_frame.columnconfigure(1, weight=0, minsize=92)
+            row_frame.columnconfigure(2, weight=0, minsize=92)
 
-            name_label = tk.Label(
+            name_entry = tk.Entry(
                 row_frame,
-                text=path.name,
-                anchor="w",
-                bg="#f0f0f0",
                 font=("Helvetica", 10),
+                relief="flat",
+                readonlybackground="#f0f0f0",
+                bg="#f0f0f0",
+                width=1,
             )
-            name_label.grid(row=0, column=0, sticky="ew")
+            name_entry.insert(0, path.name)
+            name_entry.config(state="readonly")
+            name_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
 
             l_entry = ttk.Entry(row_frame, textvariable=l_var, width=10, font=("Helvetica", 10))
-            l_entry.grid(row=0, column=1, padx=(6, 0))
+            l_entry.grid(row=0, column=1, sticky="ew")
             l_entry.bind("<FocusOut>", lambda _e: self._update_output_hint())
 
             n_entry = ttk.Entry(row_frame, textvariable=n_var, width=10, font=("Helvetica", 10))
-            n_entry.grid(row=0, column=2, padx=(6, 0))
+            n_entry.grid(row=0, column=2, sticky="ew", padx=(6, 0))
             n_entry.bind("<FocusOut>", lambda _e: self._update_output_hint())
 
-            for widget in (row_frame, name_label):
+            for widget in (row_frame, name_entry):
                 widget.bind(
                     "<Button-1>",
                     lambda e, k=key: self._on_model_row_click(e, k),
@@ -581,7 +633,7 @@ class InputForm(tk.Tk):
                 "l_var": l_var,
                 "n_var": n_var,
                 "row_frame": row_frame,
-                "name_label": name_label,
+                "name_entry": name_entry,
             }
 
         self._sync_row_selection_styles()
@@ -931,6 +983,9 @@ class InputForm(tk.Tk):
         job_name = ""
         if self.abaqus_job_entry:
             job_name = self.abaqus_job_entry.get().strip()
+        abaqus_cpus = self._read_abaqus_cpus()
+        if run_abaqus:
+            self._log(f"Bước 2: Abaqus dùng {abaqus_cpus} CPU (Threads)")
 
         def worker():
             try:
@@ -945,6 +1000,7 @@ class InputForm(tk.Tk):
                             run_abaqus=run_abaqus,
                             abaqus_cmd=self._get_abaqus_cmd_hint(),
                             job_name=job_name or None,
+                            abaqus_cpus=abaqus_cpus,
                             include_step1=False,
                             length_l_override=length_l,
                             n_override=n,
@@ -959,6 +1015,7 @@ class InputForm(tk.Tk):
                         run_abaqus=run_abaqus,
                         abaqus_cmd=self._get_abaqus_cmd_hint(),
                         job_name=job_name or None,
+                        abaqus_cpus=abaqus_cpus,
                         include_step1=False,
                         per_model_overrides=per_model_overrides,
                         on_progress=self._log,
@@ -984,8 +1041,6 @@ class InputForm(tk.Tk):
                 extra = ""
                 if result.max_rf3_bc1 is not None:
                     extra = f"\nMax RF3 (BC-1): {result.max_rf3_bc1:g}"
-                if result.run_time_seconds:
-                    extra += f"\nThời gian chạy: {format_duration(result.run_time_seconds)}"
                 excel = summary_excel_path(base_paths.output_dir)
                 if excel.is_file():
                     extra += f"\nExcel tổng hợp: {excel}"

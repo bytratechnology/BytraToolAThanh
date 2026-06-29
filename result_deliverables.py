@@ -2,41 +2,29 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 import openpyxl
 from openpyxl import Workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
 from abaqus_postprocess import rf3_xydata_output_path
-from file_io import remove_tree, run_with_retry
+from file_io import remove_tree, replace_file, run_with_retry
 
 SUMMARY_EXCEL_NAME = "TongHop_KetQua.xlsx"
 BC1_NODE_SET = "BC-1"
 ODB_OUTPUT_SUFFIX = "-TL"
-EXCEL_HEADERS = ("Tên model", "Thời gian chạy", "Max RF3 (BC-1)")
+EXCEL_HEADERS = ("Tên model", "Max RF3 (BC-1)")
+EXCEL_SAVE_RETRIES = 15
+EXCEL_SAVE_DELAY = 1.0
 
 
 @dataclass
 class ModelSummaryRow:
     model_name: str
-    run_time_seconds: float
     max_rf3_bc1: float
-
-    @property
-    def run_time_display(self) -> str:
-        return format_duration(self.run_time_seconds)
-
-
-def format_duration(seconds: float) -> str:
-    total = max(0, int(round(seconds)))
-    hours, rem = divmod(total, 3600)
-    minutes, secs = divmod(rem, 60)
-    if hours:
-        return f"{hours}h {minutes}m {secs}s"
-    if minutes:
-        return f"{minutes}m {secs}s"
-    return f"{secs}s"
 
 
 def summary_excel_path(output_root: Path) -> Path:
@@ -108,61 +96,94 @@ def cleanup_model_output_dir(output_dir: Path, *, keep_paths: set[Path]) -> list
     return removed
 
 
-def _write_workbook(path: Path, rows: list[ModelSummaryRow]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Ket qua"
-    ws.append(list(EXCEL_HEADERS))
-    for row in sorted(rows, key=lambda r: r.model_name.lower()):
-        ws.append([row.model_name, row.run_time_display, row.max_rf3_bc1])
-    wb.save(path)
+def _migrate_legacy_time_column(ws: Worksheet) -> None:
+    """File cũ 3 cột (có Thời gian chạy) -> 2 cột."""
+    header_b = str(ws.cell(1, 2).value or "").strip().lower()
+    if "thời gian" not in header_b and "thoi gian" not in header_b:
+        return
+    for row_idx in range(2, ws.max_row + 1):
+        ws.cell(row_idx, 2).value = ws.cell(row_idx, 3).value
+    ws.delete_cols(2, 1)
+    ws.cell(1, 1, EXCEL_HEADERS[0])
+    ws.cell(1, 2, EXCEL_HEADERS[1])
 
 
-def _load_existing_rows(path: Path) -> dict[str, ModelSummaryRow]:
-    if not path.is_file():
-        return {}
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+def _ensure_headers(ws: Worksheet) -> None:
+    if ws.max_row < 1 or not ws.cell(1, 1).value:
+        ws.cell(1, 1, EXCEL_HEADERS[0])
+        ws.cell(1, 2, EXCEL_HEADERS[1])
+        return
+    _migrate_legacy_time_column(ws)
+    ws.cell(1, 1, EXCEL_HEADERS[0])
+    ws.cell(1, 2, EXCEL_HEADERS[1])
+
+
+def _find_model_row(ws: Worksheet, model_name: str) -> int | None:
+    for row_idx in range(2, ws.max_row + 1):
+        cell_val = ws.cell(row_idx, 1).value
+        if cell_val is not None and str(cell_val).strip() == model_name:
+            return row_idx
+    return None
+
+
+def _upsert_row_in_sheet(ws: Worksheet, row: ModelSummaryRow) -> None:
+    _ensure_headers(ws)
+    target = _find_model_row(ws, row.model_name)
+    if target is None:
+        target = ws.max_row + 1
+    ws.cell(target, 1, row.model_name)
+    ws.cell(target, 2, row.max_rf3_bc1)
+
+
+def _save_workbook_atomic(wb: openpyxl.Workbook, excel_path: Path) -> None:
+    excel_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        suffix=".xlsx",
+        dir=excel_path.parent,
+        delete=False,
+    ) as tmp:
+        tmp_path = Path(tmp.name)
     try:
-        ws = wb.active
-        rows: dict[str, ModelSummaryRow] = {}
-        for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-            if not row or not row[0]:
-                continue
-            name = str(row[0]).strip()
-            run_time = 0.0
-            max_rf3 = 0.0
-            try:
-                if row[2] is not None:
-                    max_rf3 = float(row[2])
-            except (TypeError, ValueError):
-                pass
-            rows[name] = ModelSummaryRow(
-                model_name=name,
-                run_time_seconds=run_time,
-                max_rf3_bc1=max_rf3,
-            )
-        return rows
+        wb.save(tmp_path)
+        replace_file(tmp_path, excel_path)
     finally:
         wb.close()
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def upsert_summary_row(excel_path: Path, row: ModelSummaryRow) -> Path:
-    """Thêm hoặc cập nhật một dòng theo tên model."""
+    """Thêm hoặc cập nhật một dòng — giữ nguyên các dòng khác, ghi qua file tạm."""
     excel_path = excel_path.resolve()
-    existing = _load_existing_rows(excel_path)
-    existing[row.model_name] = row
-    run_with_retry(lambda: _write_workbook(excel_path, list(existing.values())), excel_path)
+
+    def do_upsert() -> None:
+        if excel_path.is_file():
+            wb = openpyxl.load_workbook(excel_path)
+            ws = wb.active
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Ket qua"
+        _upsert_row_in_sheet(ws, row)
+        _save_workbook_atomic(wb, excel_path)
+
+    run_with_retry(
+        do_upsert,
+        excel_path,
+        retries=EXCEL_SAVE_RETRIES,
+        delay=EXCEL_SAVE_DELAY,
+    )
     return excel_path
 
 
 def write_summary_excel(excel_path: Path, rows: list[ModelSummaryRow]) -> Path:
-    """Ghi toàn bộ bảng tổng hợp (merge với file cũ theo tên model)."""
+    """Ghi nhiều dòng — merge theo tên model."""
     excel_path = excel_path.resolve()
-    merged = _load_existing_rows(excel_path)
     for row in rows:
-        merged[row.model_name] = row
-    run_with_retry(lambda: _write_workbook(excel_path, list(merged.values())), excel_path)
+        upsert_summary_row(excel_path, row)
     return excel_path
 
 
@@ -171,7 +192,6 @@ def finalize_model_deliverables(
     *,
     job_name: str,
     imperfection_inp: Path,
-    run_time_seconds: float,
     model_name: str | None = None,
     on_progress=None,
 ) -> tuple[Path, float, list[str]]:
@@ -194,11 +214,7 @@ def finalize_model_deliverables(
     excel_path = summary_excel_path(output_dir.parent)
     upsert_summary_row(
         excel_path,
-        ModelSummaryRow(
-            model_name=label,
-            run_time_seconds=run_time_seconds,
-            max_rf3_bc1=max_rf3,
-        ),
+        ModelSummaryRow(model_name=label, max_rf3_bc1=max_rf3),
     )
 
     if on_progress:
@@ -216,7 +232,6 @@ __all__ = [
     "cleanup_model_output_dir",
     "deliverable_keep_paths",
     "finalize_model_deliverables",
-    "format_duration",
     "parse_xydata_max_rf3",
     "summary_excel_path",
     "upsert_summary_row",

@@ -44,7 +44,7 @@ def _is_file_locked_error(exc: BaseException) -> bool:
     return "being used by another process" in str(exc)
 
 
-def run_with_retry(action, path, *, retries=MAX_RETRIES):
+def run_with_retry(action, path, *, retries=MAX_RETRIES, delay=RETRY_DELAY):
     last_err = None
     for attempt in range(retries):
         try:
@@ -54,7 +54,7 @@ def run_with_retry(action, path, *, retries=MAX_RETRIES):
                 raise
             last_err = exc
             if attempt < retries - 1:
-                time.sleep(RETRY_DELAY)
+                time.sleep(delay)
     raise PermissionError(locked_file_message(path)) from last_err
 
 

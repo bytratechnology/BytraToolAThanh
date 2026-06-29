@@ -8,8 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Edit Job (CAE) / CLI — ưu tiên tối đa; thực tế = min(máy/Abaqus, JOB_NUM_CPUS)
-JOB_NUM_CPUS = 6
+# Edit Job (CAE) / CLI — người dùng chọn 1..JOB_NUM_CPUS; auto = min(lõi vật lý, JOB_NUM_CPUS)
+JOB_NUM_CPUS = 8
 JOB_MEMORY_PERCENT = 75
 JOB_MP_MODE = "threads"  # Multiprocessing mode: Threads
 JOB_NUM_DOMAINS = 1  # dùng với THREADS (không phải MPI)
@@ -20,6 +20,7 @@ ABAQUS_CPU_LIMIT_RE = re.compile(
 )
 
 _cpu_override: int | None = None
+_user_cpus: int | None = None
 
 
 def parse_abaqus_available_cpus(text: str) -> int | None:
@@ -116,15 +117,21 @@ def _detect_physical_cpu_count() -> int | None:
     return None
 
 
-def resolve_job_num_cpus() -> int:
-    """Số CPU gửi Abaqus — ưu tiên lõi vật lý (Abaqus không dùng hyper-threading)."""
-    env_cpus = os.environ.get("BYTRA_ABAQUS_CPUS", "").strip()
-    if env_cpus.isdigit():
-        return max(1, min(JOB_NUM_CPUS, int(env_cpus)))
+def set_user_job_cpus(count: int | None) -> None:
+    """Số CPU do người dùng chọn trên GUI."""
+    global _user_cpus
+    if count is None:
+        _user_cpus = None
+        return
+    _user_cpus = max(1, int(count))
 
-    if _cpu_override is not None:
-        return max(1, min(JOB_NUM_CPUS, _cpu_override))
 
+def get_user_job_cpus() -> int | None:
+    return _user_cpus
+
+
+def get_max_available_cpus() -> int:
+    """Số CPU tối đa nên dùng (lõi vật lý, cap JOB_NUM_CPUS)."""
     try:
         logical = os.cpu_count() or 1
     except (TypeError, OSError):
@@ -134,12 +141,28 @@ def resolve_job_num_cpus() -> int:
     if physical:
         available = physical
     elif sys.platform == "win32" and logical > 1:
-        # Máy Windows không đọc được lõi vật lý — ước lượng an toàn (HT thường x2)
         available = max(1, logical // 2)
     else:
         available = logical
 
     return max(1, min(JOB_NUM_CPUS, available))
+
+
+def resolve_job_num_cpus() -> int:
+    """Số CPU gửi Abaqus — ưu tiên lõi vật lý (Abaqus không dùng hyper-threading)."""
+    max_avail = get_max_available_cpus()
+
+    env_cpus = os.environ.get("BYTRA_ABAQUS_CPUS", "").strip()
+    if env_cpus.isdigit():
+        return max(1, min(max_avail, int(env_cpus)))
+
+    if _cpu_override is not None:
+        return max(1, min(max_avail, _cpu_override))
+
+    if _user_cpus is not None:
+        return max(1, min(JOB_NUM_CPUS, _user_cpus))
+
+    return max_avail
 
 
 def cli_job_resource_args(cpus: int | None = None) -> list[str]:
@@ -245,6 +268,9 @@ __all__ = [
     "parse_abaqus_available_cpus",
     "set_job_cpu_override",
     "JOB_NUM_DOMAINS",
+    "get_max_available_cpus",
+    "get_user_job_cpus",
+    "set_user_job_cpus",
     "cae_configure_riks_steps_snippet",
     "cae_job_constructor_snippet",
     "cli_job_resource_args",
