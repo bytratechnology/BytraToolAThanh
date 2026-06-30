@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -123,9 +124,129 @@ def derive_model_name(inp_path: Path, job_name: str) -> str:
     return sanitize_job_name(job_name, max_len=64)
 
 
-def _inp_cli_arg(inp_path: Path) -> str:
-    """Đường dẫn .inp tuyệt đối — tránh lệch cwd trên Windows."""
-    return str(inp_path.resolve())
+def _inp_cli_arg(inp_path: Path, work_dir: Path) -> str:
+    """
+    Tham số input= cho Abaqus CLI.
+    Luôn ưu tiên tên file (cwd = thư mục chứa .inp) — tránh ENOENT khi path có
+    khoảng trắng / ký tự Unicode trên Windows.
+    """
+    resolved = inp_path.resolve()
+    if resolved.parent == work_dir.resolve():
+        return resolved.name
+    return str(resolved)
+
+
+def _is_enoent_error(text: str) -> bool:
+    upper = text.upper()
+    return (
+        "ENOENT" in upper
+        or "PATH NAME OF THE FILE DOES NOT EXIST" in upper
+        or ("DOES NOT EXIST" in upper and "FILE" in upper)
+    )
+
+
+def prepare_abaqus_job_input(
+    work_dir: Path,
+    imperfection_inp: Path,
+    job_name: str,
+) -> Path:
+    """
+    Đảm bảo {job_name}.inp tồn tại trong work_dir.
+    Abaqus mặc định tìm job-name.inp — nếu chỉ có *_IMPERFECTION.inp sẽ ENOENT.
+    """
+    work_dir = work_dir.resolve()
+    imperfection_inp = imperfection_inp.resolve()
+    job_name = sanitize_job_name(job_name)
+    job_inp = work_dir / f"{job_name}.inp"
+
+    if not imperfection_inp.is_file():
+        raise FileNotFoundError(f"Không tìm thấy file input: {imperfection_inp}")
+    if imperfection_inp.stat().st_size == 0:
+        raise ValueError(f"File input rỗng: {imperfection_inp.name}")
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    if imperfection_inp == job_inp:
+        return job_inp
+
+    if job_inp.exists():
+        try:
+            job_inp.unlink()
+        except OSError:
+            pass
+
+    try:
+        os.link(imperfection_inp, job_inp)
+    except OSError:
+        shutil.copy2(imperfection_inp, job_inp)
+
+    if not job_inp.is_file() or job_inp.stat().st_size == 0:
+        raise RuntimeError(
+            f"Không tạo được {job_inp.name} từ {imperfection_inp.name}"
+        )
+
+    return job_inp
+
+
+def _verify_abaqus_workdir(work_dir: Path, cli_inp: Path, job_name: str):
+    work_dir = work_dir.resolve()
+    cli_inp = cli_inp.resolve()
+    errors: list[str] = []
+
+    if not work_dir.is_dir():
+        errors.append(f"Thư mục làm việc không tồn tại: {work_dir}")
+    if not cli_inp.is_file():
+        errors.append(f"Không tìm thấy file input CLI: {cli_inp}")
+    elif cli_inp.parent != work_dir:
+        errors.append(
+            f"File input không nằm trong thư mục làm việc:\n"
+            f"  input: {cli_inp}\n  work_dir: {work_dir}"
+        )
+    elif cli_inp.stat().st_size == 0:
+        errors.append(f"File input rỗng: {cli_inp.name}")
+
+    expected = work_dir / f"{sanitize_job_name(job_name)}.inp"
+    if cli_inp != expected and not expected.is_file():
+        errors.append(f"Thiếu file theo tên job: {expected.name}")
+
+    if errors:
+        raise FileNotFoundError("\n".join(errors))
+
+
+def _append_submit_log(work_dir: Path, title: str, text: str):
+    if not text.strip():
+        return
+    path = _submit_log_path(work_dir)
+    try:
+        with path.open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(f"\n--- {title} ---\n{text.rstrip()}\n")
+    except OSError:
+        pass
+
+
+def _log_abaqus_preflight(
+    work_dir: Path,
+    abaqus_cmd: str,
+    cli_inp: Path,
+    job_name: str,
+):
+    work_dir = work_dir.resolve()
+    cli_inp = cli_inp.resolve()
+    files = sorted(p.name for p in work_dir.iterdir() if p.is_file())[:30]
+    _append_submit_log(
+        work_dir,
+        "preflight",
+        "\n".join(
+            [
+                f"cwd={work_dir}",
+                f"abaqus={abaqus_cmd}",
+                f"job={job_name}",
+                f"input={cli_inp.name}",
+                f"input_size={cli_inp.stat().st_size if cli_inp.is_file() else 0}",
+                f"files={', '.join(files) if files else '(trống)'}",
+            ]
+        ),
+    )
 
 
 def discover_job_name(work_dir: Path, hint: str) -> str:
@@ -611,6 +732,13 @@ def _raise_if_failed(result, work_dir: Path, job_name: str, step_label: str):
     if result.returncode == 0 and not _analysis_failed(work_dir, job_name):
         return
     err = (result.stderr or result.stdout or "").strip()
+    _append_submit_log(work_dir, step_label, err)
+    if _is_enoent_error(err):
+        err = (
+            f"{err}\n\n"
+            "Gợi ý: Abaqus không mở được file .inp — kiểm tra file {job}.inp "
+            "trong thư mục poll và quyền ghi thư mục."
+        ).strip()
     log_tail = _read_job_log_tail(work_dir, job_name)
     if log_tail:
         err = (err + "\n\n--- Abaqus log ---\n" + log_tail).strip()
@@ -734,19 +862,25 @@ print('DONE: Job COMPLETED -> ' + job_name + '.odb')
 def _run_cli_datacheck(
     cmd: str,
     job_name: str,
-    inp_path: Path,
+    cli_inp: Path,
     work_dir: Path,
     on_progress,
     *,
     cpus: int | None = None,
 ):
     _notify(on_progress, f"Bước 2: CHECK datacheck — job={job_name}")
+    input_arg = _inp_cli_arg(cli_inp, work_dir)
     args = [
         f"job={job_name}",
-        f"input={_inp_cli_arg(inp_path)}",
+        f"input={input_arg}",
         "datacheck=continue",
         *cli_job_resource_args(cpus),
     ]
+    _append_submit_log(
+        work_dir,
+        "datacheck command",
+        f"cwd={work_dir.resolve()}\n{cmd} {' '.join(args)}",
+    )
     _notify(on_progress, f"Bước 2: Lệnh: {cmd} {' '.join(args)}")
     result = run_abaqus_subprocess(cmd, args, cwd=work_dir, timeout=DATACHECK_TIMEOUT)
     _raise_if_failed(result, work_dir, job_name, "Datacheck")
@@ -755,7 +889,7 @@ def _run_cli_datacheck(
 def _run_cli_submit(
     cmd: str,
     job_name: str,
-    inp_path: Path,
+    cli_inp: Path,
     work_dir: Path,
     on_progress,
     *,
@@ -763,13 +897,19 @@ def _run_cli_submit(
 ) -> subprocess.Popen:
     _notify(on_progress, f"Bước 2: SUBMIT phân tích — job={job_name}")
     log_file = _submit_log_path(work_dir)
+    input_arg = _inp_cli_arg(cli_inp, work_dir)
     args = [
         f"job={job_name}",
-        f"input={_inp_cli_arg(inp_path)}",
+        f"input={input_arg}",
         *cli_job_resource_args(cpus),
         "ask=off",
         "background",
     ]
+    _append_submit_log(
+        work_dir,
+        "submit command",
+        f"cwd={work_dir.resolve()}\n{cmd} {' '.join(args)}",
+    )
     _notify(on_progress, f"Bước 2: Lệnh: {cmd} {' '.join(args)}")
     _notify(on_progress, f"Bước 2: Poll thư mục → {work_dir.resolve()}")
     _notify(on_progress, "Bước 2: Đã submit — tự kiểm tra .sta/.odb, xong sớm thì lấy ngay…")
@@ -791,22 +931,29 @@ def _maybe_lower_cpus_from_error(err_text: str, current_cpus: int, on_progress) 
 def _run_cli_analysis_with_cpu_retries(
     cmd: str,
     job_name: str,
-    inp_path: Path,
+    cli_inp: Path,
     work_dir: Path,
     on_progress,
+    *,
+    source_inp: Path | None = None,
 ) -> str:
     """Datacheck + submit + chờ — tự giảm cpus nếu Abaqus báo vượt giới hạn."""
     set_job_cpu_override(None)
     last_error: RuntimeError | None = None
+    source_inp = (source_inp or cli_inp).resolve()
 
     for attempt in range(3):
         cpus = resolve_job_num_cpus()
         try:
+            if attempt > 0:
+                cli_inp = prepare_abaqus_job_input(work_dir, source_inp, job_name)
+                _verify_abaqus_workdir(work_dir, cli_inp, job_name)
+
             _run_cli_datacheck(
-                cmd, job_name, inp_path, work_dir, on_progress, cpus=cpus
+                cmd, job_name, cli_inp, work_dir, on_progress, cpus=cpus
             )
             analysis_proc = _run_cli_submit(
-                cmd, job_name, inp_path, work_dir, on_progress, cpus=cpus
+                cmd, job_name, cli_inp, work_dir, on_progress, cpus=cpus
             )
             return _wait_for_completion(
                 work_dir, job_name, on_progress, process=analysis_proc
@@ -814,6 +961,12 @@ def _run_cli_analysis_with_cpu_retries(
         except RuntimeError as exc:
             last_error = exc
             err_text = f"{exc}\n{_read_submit_log_tail(work_dir)}"
+            if attempt < 2 and _is_enoent_error(err_text):
+                _notify(
+                    on_progress,
+                    f"Bước 2: Abaqus không tìm thấy file input — tạo lại {job_name}.inp và thử lại…",
+                )
+                continue
             if attempt < 2 and _maybe_lower_cpus_from_error(err_text, cpus, on_progress):
                 continue
             raise
@@ -1008,17 +1161,31 @@ def run_abaqus_analysis(
     if num_cpus is not None:
         set_user_job_cpus(num_cpus)
 
+    cli_inp = prepare_abaqus_job_input(work_dir, inp_path, job_name)
+    _verify_abaqus_workdir(work_dir, cli_inp, job_name)
+    _log_abaqus_preflight(work_dir, cmd, cli_inp, job_name)
+    if cli_inp.name != inp_path.name:
+        _notify(
+            on_progress,
+            f"Bước 2: Input Abaqus → {cli_inp.name} (từ {inp_path.name})",
+        )
+
     started_at = time.monotonic()
     analysis_proc: subprocess.Popen | None = None
     try:
         job_name = _run_cli_analysis_with_cpu_retries(
-            cmd, job_name, inp_path, work_dir, on_progress
+            cmd,
+            job_name,
+            cli_inp,
+            work_dir,
+            on_progress,
+            source_inp=inp_path,
         )
     except RuntimeError as cli_error:
         _notify(on_progress, f"Bước 2: CLI lỗi, thử script CAE — {cli_error}")
         script_path = (script_output or work_dir / "abaqus_run_imperfection.py").resolve()
         script_content = build_abaqus_analysis_script(
-            inp_path,
+            cli_inp,
             work_dir=work_dir,
             job_name=job_name,
             model_name=model_name,
