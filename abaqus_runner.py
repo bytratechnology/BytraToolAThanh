@@ -123,16 +123,9 @@ def derive_model_name(inp_path: Path, job_name: str) -> str:
     return sanitize_job_name(job_name, max_len=64)
 
 
-def _inp_cli_arg(inp_path: Path, work_dir: Path | None = None) -> str:
-    """
-    Tham số input= cho Abaqus CLI.
-    Dùng tên file (cwd = thư mục chứa .inp) — tránh lỗi ENOENT khi đường dẫn
-    tuyệt đối có khoảng trắng / ký tự Unicode trên Windows.
-    """
-    resolved = inp_path.resolve()
-    if work_dir is not None and resolved.parent == work_dir.resolve():
-        return resolved.name
-    return str(resolved)
+def _inp_cli_arg(inp_path: Path) -> str:
+    """Đường dẫn .inp tuyệt đối — tránh lệch cwd trên Windows."""
+    return str(inp_path.resolve())
 
 
 def discover_job_name(work_dir: Path, hint: str) -> str:
@@ -167,17 +160,6 @@ def _read_submit_log_tail(work_dir: Path, lines: int = 30) -> str:
         return "\n".join(tail).strip()
     except OSError:
         return ""
-
-
-def _append_submit_log(work_dir: Path, title: str, text: str):
-    if not text.strip():
-        return
-    path = _submit_log_path(work_dir)
-    try:
-        with path.open("a", encoding="utf-8", errors="replace") as handle:
-            handle.write(f"\n--- {title} ---\n{text.rstrip()}\n")
-    except OSError:
-        pass
 
 
 def find_imperfection_inp(output_dir: Path, inp_source: Path) -> Path | None:
@@ -629,7 +611,6 @@ def _raise_if_failed(result, work_dir: Path, job_name: str, step_label: str):
     if result.returncode == 0 and not _analysis_failed(work_dir, job_name):
         return
     err = (result.stderr or result.stdout or "").strip()
-    _append_submit_log(work_dir, step_label, err)
     log_tail = _read_job_log_tail(work_dir, job_name)
     if log_tail:
         err = (err + "\n\n--- Abaqus log ---\n" + log_tail).strip()
@@ -762,7 +743,7 @@ def _run_cli_datacheck(
     _notify(on_progress, f"Bước 2: CHECK datacheck — job={job_name}")
     args = [
         f"job={job_name}",
-        f"input={_inp_cli_arg(inp_path, work_dir)}",
+        f"input={_inp_cli_arg(inp_path)}",
         "datacheck=continue",
         *cli_job_resource_args(cpus),
     ]
@@ -784,7 +765,7 @@ def _run_cli_submit(
     log_file = _submit_log_path(work_dir)
     args = [
         f"job={job_name}",
-        f"input={_inp_cli_arg(inp_path, work_dir)}",
+        f"input={_inp_cli_arg(inp_path)}",
         *cli_job_resource_args(cpus),
         "ask=off",
         "background",
