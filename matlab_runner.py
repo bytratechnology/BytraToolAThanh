@@ -10,6 +10,47 @@ from inp_writer import write_myfile_to_inp
 from paths import DEFAULT_PATHS, ProjectPaths
 
 MATLAB_PATH_FILE = Path("matlab_path.txt")
+_MATLAB_SUPPORTS_BATCH: bool | None = None
+
+
+def _matlab_batch_statement(script_name: str) -> str:
+    """Chạy script .m rồi thoát MATLAB (kể cả khi lỗi)."""
+    return (
+        f"try; run('{script_name}'); catch ME; "
+        f"disp(getReport(ME)); exit(1); end; exit(0);"
+    )
+
+
+def _matlab_supports_batch(exe: str) -> bool:
+    """MATLAB R2019a+ có -batch (không mở desktop, tự thoát)."""
+    global _MATLAB_SUPPORTS_BATCH
+    if _MATLAB_SUPPORTS_BATCH is not None:
+        return _MATLAB_SUPPORTS_BATCH
+    try:
+        result = subprocess.run(
+            [exe, "-help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        help_text = (result.stdout or "") + (result.stderr or "")
+        _MATLAB_SUPPORTS_BATCH = "-batch" in help_text
+    except (subprocess.TimeoutExpired, OSError):
+        _MATLAB_SUPPORTS_BATCH = False
+    return _MATLAB_SUPPORTS_BATCH
+
+
+def _matlab_argv(exe: str, script_name: str) -> list[str]:
+    """Tham số dòng lệnh: chạy nền, không splash/desktop, tự đóng khi xong."""
+    statement = _matlab_batch_statement(script_name)
+    argv = [exe, "-nosplash", "-nodesktop"]
+    if sys.platform == "win32":
+        argv.append("-wait")
+    if _matlab_supports_batch(exe):
+        argv.extend(["-batch", statement])
+    else:
+        argv.extend(["-r", statement])
+    return argv
 
 
 def find_matlab_executable():
@@ -48,7 +89,7 @@ def _run_matlab_binary(exe, paths: ProjectPaths, timeout, on_progress=None):
     script_name = paths.matlab_script_name
     _notify(on_progress, f"Bước 2: Đang chạy MATLAB ({script_name}.m)...")
     result = subprocess.run(
-        [exe, "-batch", f"run('{script_name}')"],
+        _matlab_argv(exe, script_name),
         cwd=work_dir,
         capture_output=True,
         text=True,

@@ -12,6 +12,7 @@ from paths import DEFAULT_PATHS, ProjectPaths
 SHEET_SECTION_A = "SectionA"
 START_ROW = 3
 TOL = 1e-3
+COORD_OFFSET = 7.5
 
 
 def write_nodes_to_section_a(nodes, excel_template, excel_output, start_row=3):
@@ -85,9 +86,25 @@ def _dist(point):
     return math.hypot(point[0], point[1])
 
 
-def find_lip_midpoint_between(point_a, point_b, nodes):
-    """Điểm giữa trên môi (X23/Y23, X78/Y78): cùng x, nằm giữa 2 điểm, gần trục hoành nhất."""
-    x_lip = point_a[0]
+def _farthest_in_quadrant(xy_points, x_positive, y_positive):
+    """Điểm xa gốc tọa độ nhất trong một góc phần tư."""
+    candidates = [
+        p
+        for p in xy_points
+        if (p[0] > 0 if x_positive else p[0] < 0)
+        and (p[1] > 0 if y_positive else p[1] < 0)
+    ]
+    if not candidates:
+        quadrant = (
+            f"x{'>' if x_positive else '<'}0, y{'>' if y_positive else '<'}0"
+        )
+        raise ValueError(f"Không tìm thấy điểm trong góc phần tư ({quadrant})")
+    return max(candidates, key=_dist)
+
+
+def find_lip_midpoint_between(point_a, point_b, nodes, lip_x=None):
+    """Điểm giữa trên môi (X23/Y23, X78/Y78): cùng x môi, nằm giữa 2 điểm, gần trục hoành nhất."""
+    x_lip = lip_x if lip_x is not None else point_a[0]
     y_low = min(point_a[1], point_b[1])
     y_high = max(point_a[1], point_b[1])
 
@@ -106,60 +123,48 @@ def find_lip_midpoint_between(point_a, point_b, nodes):
 def select_11_points(nodes):
     """
     Chọn 11 tọa độ (x, y) theo thứ tự MATLAB:
-    9 điểm đo + 2 điểm giữa môi (23 giữa 2-3, 78 giữa 7-8).
+    - Điểm 1-4, 6-9: từ điểm xa nhất mỗi góc phần tư, offset ±7.5 theo trục
+    - Điểm 5: gần trục tung nhất
+    - Điểm 23, 78: giữa môi giữa điểm 2-3 và 7-8
     """
     xy_points = list({(x, y) for _, x, y, _ in nodes})
+    offset = COORD_OFFSET
 
-    max_y = max(p[1] for p in xy_points)
-    min_y = min(p[1] for p in xy_points)
-    max_x = max(p[0] for p in xy_points)
-    min_x = min(p[0] for p in xy_points)
+    # A: Q2 (x<0, y>0), B: Q3, C: Q4, D: Q1
+    point_a = _farthest_in_quadrant(xy_points, x_positive=False, y_positive=True)
+    point_b = _farthest_in_quadrant(xy_points, x_positive=False, y_positive=False)
+    point_c = _farthest_in_quadrant(xy_points, x_positive=True, y_positive=False)
+    point_d = _farthest_in_quadrant(xy_points, x_positive=True, y_positive=True)
 
-    q1 = [p for p in xy_points if p[0] > 0 and p[1] > 0]
-    q2 = [p for p in xy_points if p[0] < 0 and p[1] > 0]
-    q3 = [p for p in xy_points if p[0] < 0 and p[1] < 0]
-    q4 = [p for p in xy_points if p[0] > 0 and p[1] < 0]
+    p1 = (point_a[0] + offset, point_a[1])
+    p2 = (point_a[0], point_a[1] - offset)
+    p3 = (point_b[0], point_b[1] + offset)
+    p4 = (point_b[0] + offset, point_b[1])
+    p6 = (point_c[0] - offset, point_c[1])
+    p7 = (point_c[0], point_c[1] + offset)
+    p8 = (point_d[0], point_d[1] - offset)
+    p9 = (point_d[0] - offset, point_d[1])
 
-    on_max_y = lambda p: abs(p[1] - max_y) < TOL
-    on_min_y = lambda p: abs(p[1] - min_y) < TOL
-    on_max_x = lambda p: abs(p[0] - max_x) < TOL
-    on_min_x = lambda p: abs(p[0] - min_x) < TOL
-
-    q1_flange = max([p for p in q1 if on_max_y(p)], key=lambda p: p[0])
-    q1_lip = max([p for p in q1 if on_max_x(p)], key=lambda p: p[1])
-
-    q2_flange = max([p for p in q2 if on_max_y(p)], key=lambda p: -p[0])
-    q2_lip = max([p for p in q2 if on_min_x(p)], key=lambda p: p[1])
-
-    neg_x_axis = max([p for p in q3 if on_min_x(p)], key=lambda p: -p[1])
-
-    q3_on_web = sorted(
-        [p for p in q3 if on_min_y(p)],
-        key=lambda p: p[0],
-    )
     near_y_axis = min(xy_points, key=lambda p: (abs(p[0]), -_dist(p)))
-    q3_on_web = [p for p in q3_on_web if p != near_y_axis]
-    q3_web = q3_on_web[1] if len(q3_on_web) > 1 else q3_on_web[0]
 
-    q4_on_web = sorted([p for p in q4 if on_min_y(p)], key=lambda p: p[0], reverse=True)
-    q4_web = q4_on_web[1] if len(q4_on_web) > 1 else q4_on_web[0]
-    pos_x_axis = max([p for p in q4 if on_max_x(p)], key=lambda p: -p[1])
+    min_x = min(p[0] for p in xy_points)
+    max_x = max(p[0] for p in xy_points)
 
-    mid_23 = find_lip_midpoint_between(q2_lip, neg_x_axis, nodes)
-    mid_78 = find_lip_midpoint_between(pos_x_axis, q1_lip, nodes)
+    mid_23 = find_lip_midpoint_between(p2, p3, nodes, lip_x=min_x)
+    mid_78 = find_lip_midpoint_between(p7, p8, nodes, lip_x=max_x)
 
     return [
-        ("Điểm 1 (X1,Y1) - Q2 vành", q2_flange),
-        ("Điểm 2 (X2,Y2) - Q2 môi", q2_lip),
+        ("Điểm 1 (X1,Y1) - Q2, A + offset x", p1),
+        ("Điểm 2 (X2,Y2) - Q2, A - offset y", p2),
         ("Điểm 23 (X23,Y23) - giữa điểm 2 và 3", mid_23),
-        ("Điểm 3 (X3,Y3) - trục hoành âm", neg_x_axis),
-        ("Điểm 4 (X4,Y4) - Q3 web", q3_web),
+        ("Điểm 3 (X3,Y3) - Q3, B + offset y", p3),
+        ("Điểm 4 (X4,Y4) - Q3, B + offset x", p4),
         ("Điểm 5 (X5,Y5) - trục tung", near_y_axis),
-        ("Điểm 6 (X6,Y6) - Q4 web", q4_web),
-        ("Điểm 7 (X7,Y7) - trục hoành dương", pos_x_axis),
+        ("Điểm 6 (X6,Y6) - Q4, C - offset x", p6),
+        ("Điểm 7 (X7,Y7) - Q4, C + offset y", p7),
         ("Điểm 78 (X78,Y78) - giữa điểm 7 và 8", mid_78),
-        ("Điểm 8 (X8,Y8) - Q1 môi", q1_lip),
-        ("Điểm 9 (X9,Y9) - Q1 vành", q1_flange),
+        ("Điểm 8 (X8,Y8) - Q1, D - offset y", p8),
+        ("Điểm 9 (X9,Y9) - Q1, D - offset x", p9),
     ]
 
 
